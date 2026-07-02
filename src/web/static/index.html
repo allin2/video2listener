@@ -625,7 +625,8 @@
         timeline.setStageCancelled(sid);
         statusBadge.textContent = '已取消'; statusBadge.className = 'status-badge status-failed';
         progressTitle.textContent = '⏹ 已取消';
-        onPipelineDone(d);
+        document.title = '[✗] video2listener';
+        sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
       });
 
       sseSource.onerror = () => {
@@ -643,7 +644,26 @@
     const doneState = { status: 'done', output_path: d.output_path, completed_at: Date.now() / 1000 };
     if (d.title) document.title = '[✓] ' + d.title + ' · video2listener';
     else document.title = '[✓] video2listener';
+    // 系统通知
+    fireNotification(d.title || '视频', d.video_id);
     updateUI(doneState);
+  }
+
+  function fireNotification(title, vid) {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'granted') {
+      try {
+        const n = new Notification('✅ 视频已生成', { body: '《' + title + '》已生成，点击下载', tag: vid });
+        n.onclick = () => { window.focus(); if (downloadBtn) downloadBtn.scrollIntoView(); n.close(); };
+      } catch (_) {}
+    }
+  }
+
+  function requestNotificationPermission() {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
   }
 
   async function cancelTask() {
@@ -758,7 +778,11 @@
       showError(state.error_message||'未知错误');
     }
   }
-  function showError(msg) { errorCard.classList.remove('hidden'); errorMsg.textContent=msg; sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt'); }
+  function showError(msg) {
+    errorCard.classList.remove('hidden'); errorMsg.textContent=msg;
+    document.title = '[✗] video2listener';
+    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+  }
 
   function returnToForm(clearUrl) {
     stopPolling();
@@ -811,6 +835,7 @@
       }
 
       if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
+      requestNotificationPermission();
       startProgressUI(data);
     } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
   });
@@ -843,6 +868,7 @@
         return;
       }
       if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
+      requestNotificationPermission();
       startProgressUI(data);
     } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
   }
