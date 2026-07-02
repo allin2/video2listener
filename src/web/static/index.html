@@ -91,6 +91,55 @@
   .error-msg { color: #dc2626; font-size: 0.9rem; white-space: pre-wrap; }
   .hidden { display: none !important; }
 
+  /* ── Pipeline Timeline ──────────────────────────────────────────────── */
+  .pipeline-timeline { display: flex; flex-direction: column; gap: 0; }
+  .stage-node { display: flex; align-items: flex-start; gap: 0.75rem; position: relative; padding-bottom: 0.7rem; cursor: default; }
+  .stage-node:last-child { padding-bottom: 0; }
+  .stage-dot {
+    width: 14px; height: 14px; border-radius: 50%; margin-top: 3px; flex-shrink: 0;
+    position: relative; z-index: 1; transition: background 0.3s, box-shadow 0.3s;
+  }
+  .stage-dot.pending { background: #d1d5db; border: 2px solid #d1d5db; }
+  .stage-dot.active { background: #4f46e5; box-shadow: 0 0 0 4px rgba(79,70,229,.25); animation: stagePulse 1.5s ease-in-out infinite; }
+  .stage-dot.done { background: #16a34a; }
+  .stage-dot.failed { background: #dc2626; }
+  .stage-dot.cancelled { background: #9ca3af; }
+  @keyframes stagePulse {
+    0%, 100% { box-shadow: 0 0 0 4px rgba(79,70,229,.25); }
+    50% { box-shadow: 0 0 0 8px rgba(79,70,229,.08); }
+  }
+  .stage-line {
+    position: absolute; left: 6px; top: 20px; width: 2px; height: calc(100% - 8px); background: #e5e7eb; z-index: 0;
+  }
+  .stage-line.done { background: #16a34a; }
+  .stage-info { flex: 1; min-width: 0; }
+  .stage-name { font-size: 0.88rem; font-weight: 600; color: #6b7280; margin-bottom: 1px; transition: color 0.3s; }
+  .stage-name.active { color: #4f46e5; }
+  .stage-name.done { color: #1a1a1a; }
+  .stage-name.failed { color: #dc2626; }
+  .stage-meta { font-size: 0.75rem; color: #9ca3af; }
+  .stage-meta .duration { color: #6b7280; }
+  .stage-log-panel {
+    display: none; margin-top: 0.4rem; padding: 0.5rem 0.6rem; background: #f9fafb; border-radius: 6px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; color: #6b7280;
+    border-left: 2px solid #e5e7eb; max-height: 160px; overflow-y: auto; line-height: 1.5; white-space: pre-wrap;
+  }
+  .stage-log-panel.active { border-left-color: #4f46e5; }
+  .stage-log-panel.expanded { display: block; }
+  .stage-log-panel .log-entry { color: #6b7280; }
+  .stage-log-panel .log-entry:last-child { color: #374151; }
+  .stage-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+  .stage-btn {
+    padding: 0.3rem 0.75rem; border: 1.5px solid #d1d5db; border-radius: 6px;
+    background: #fff; font-size: 0.78rem; cursor: pointer; transition: all 0.2s;
+  }
+  .stage-btn:hover { border-color: #6b7280; }
+  .stage-btn.cancel-btn { color: #dc2626; border-color: #fecaca; }
+  .stage-btn.cancel-btn:hover { background: #fef2f2; border-color: #dc2626; }
+  .stage-btn.cancel-btn:disabled { color: #9ca3af; border-color: #e5e7eb; background: #f9fafb; cursor: not-allowed; }
+  .stage-btn.retry-btn { color: #4f46e5; border-color: #c7d2fe; }
+  .stage-btn.retry-btn:hover { background: #f0efff; border-color: #4f46e5; }
+
   @media (max-width: 480px) {
     body { padding: 1rem 0.5rem; }
     .card { padding: 1rem; }
@@ -207,7 +256,7 @@
     <h2 id="progressTitle">⏳ 处理中</h2>
     <span class="status-badge" id="statusBadge">排队中</span>
     <p class="meta" id="metaInfo"></p>
-    <div class="progress-log" id="progressLog"></div>
+    <div class="pipeline-timeline" id="pipelineTimeline"></div>
   </div>
   <div class="card hidden" id="resultCard">
     <h2>✅ 处理完成</h2>
@@ -228,6 +277,7 @@
 <script>
 (function () {
   let pollTimer = null, elapsedTimer = null, videoId = null, startedAt = null, pollFailures = 0;
+  let sseSource = null, timeline = null;
 
   const $ = id => document.getElementById(id);
   const formCard = $('formCard'), progressCard = $('progressCard'), resultCard = $('resultCard'), errorCard = $('errorCard');
@@ -235,11 +285,16 @@
   const fetchModelsBtn = $('fetchModelsBtn'), fetchVoicesBtn = $('fetchVoicesBtn');
   const modelSelect = $('modelSelect'), ttsVoice = $('ttsVoice');
   const statusBadge = $('statusBadge'), metaInfo = $('metaInfo');
-  const progressLog = $('progressLog'), progressTitle = $('progressTitle');
+  const pipelineTimeline = $('pipelineTimeline'), progressTitle = $('progressTitle');
   const downloadBtn = $('downloadBtn'), errorMsg = $('errorMsg'), retryBtn = $('retryBtn');
   const elapsedFinal = $('elapsedFinal'), newTaskBtn = $('newTaskBtn');
   const rememberConfig = $('rememberConfig'), clearConfigBtn = $('clearConfigBtn');
   const CONFIG_STORAGE_KEY = 'v2l_savedConfig_v1';
+
+  const SSE_STAGES = [
+    {id:1,name:'下载',icon:'📥'},{id:2,name:'转写',icon:'🎙️'},{id:3,name:'清洗',icon:'🧹'},
+    {id:4,name:'翻译',icon:'🌐'},{id:5,name:'TTS',icon:'🔊'},{id:6,name:'合并',icon:'🎵'},
+  ];
 
   function setSelectValue(select, value) {
     if (!value) return;
@@ -309,7 +364,8 @@
     videoId = savedVideoId;
     startedAt = parseFloat(sessionStorage.getItem('v2l_startedAt') || '0');
     formCard.classList.add('hidden'); progressCard.classList.remove('hidden');
-    startPolling();
+    timeline = new PipelineTimeline(pipelineTimeline);
+    startSSE(videoId);
   }
 
   function formatElapsed(sec) {
@@ -319,6 +375,298 @@
     return m>0 ? `${h}小时${m}分钟` : `${h}小时`;
   }
   function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  // ── PipelineTimeline ────────────────────────────────────────────────
+  class PipelineTimeline {
+    constructor(container) {
+      this.container = container;
+      this.stages = new Map(); // id → {el, dotEl, lineEl, nameEl, metaEl, logEl, actionsEl}
+      this.currentStageId = 0;
+      this._build();
+    }
+
+    _build() {
+      this.container.innerHTML = '';
+      SSE_STAGES.forEach((s, i) => {
+        const node = document.createElement('div');
+        node.className = 'stage-node';
+        node.dataset.stageId = s.id;
+
+        const dot = document.createElement('div');
+        dot.className = 'stage-dot pending';
+
+        const line = document.createElement('div');
+        line.className = 'stage-line';
+        if (i === SSE_STAGES.length - 1) line.style.display = 'none';
+
+        const info = document.createElement('div');
+        info.className = 'stage-info';
+
+        const name = document.createElement('div');
+        name.className = 'stage-name';
+        name.textContent = s.icon + ' ' + s.name;
+
+        const meta = document.createElement('div');
+        meta.className = 'stage-meta';
+        meta.textContent = '等待中';
+
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const logPanel = document.createElement('div');
+        logPanel.className = 'stage-log-panel';
+
+        const actions = document.createElement('div');
+        actions.className = 'stage-actions';
+
+        node.appendChild(dot);
+        node.appendChild(line);
+        node.appendChild(info);
+        node.appendChild(logPanel);
+        node.appendChild(actions);
+        this.container.appendChild(node);
+
+        this.stages.set(s.id, {
+          el: node, dotEl: dot, lineEl: line, nameEl: name, metaEl: meta,
+          logEl: logPanel, actionsEl: actions, status: 'pending'
+        });
+
+        // Click to toggle log
+        node.addEventListener('click', () => this._toggleLog(s.id));
+      });
+    }
+
+    _toggleLog(id) {
+      const st = this.stages.get(id);
+      if (!st || st.status === 'pending') return;
+      // Collapse all others, toggle this one
+      this.stages.forEach((v, k) => {
+        if (k !== id) v.logEl.classList.remove('expanded');
+      });
+      st.logEl.classList.toggle('expanded');
+      if (st.logEl.classList.contains('expanded')) {
+        st.logEl.scrollTop = st.logEl.scrollHeight;
+      }
+    }
+
+    _setStatus(id, status) {
+      const st = this.stages.get(id);
+      if (!st) return;
+      st.status = status;
+      const els = [st.dotEl, st.nameEl, st.lineEl];
+      els.forEach(el => { el.classList.remove('pending','active','done','failed','cancelled'); el.classList.add(status); });
+    }
+
+    setStageActive(id) {
+      // Mark all previous stages done
+      for (let i = 1; i < id; i++) {
+        if (this.stages.get(i).status === 'pending') {
+          this._setStatus(i, 'done');
+          this.stages.get(i).metaEl.innerHTML = '<span class="duration">✓</span>';
+        }
+      }
+      this._setStatus(id, 'active');
+      this.stages.get(id).metaEl.innerHTML = '<span class="duration">进行中…</span>';
+      this.currentStageId = id;
+      // Auto-expand active stage log
+      this._toggleLog(id);
+      // Show cancel button
+      this._showAction(id, 'cancel');
+    }
+
+    setStageDone(id, durationS, meta) {
+      this._setStatus(id, 'done');
+      const st = this.stages.get(id);
+      const parts = [];
+      if (durationS != null) parts.push(formatElapsed(durationS));
+      if (meta) parts.push(meta);
+      st.metaEl.innerHTML = parts.length ? parts.join(' · ') : '✓';
+      this._clearActions(id);
+    }
+
+    setStageFailed(id, message) {
+      this._setStatus(id, 'failed');
+      const st = this.stages.get(id);
+      st.metaEl.innerHTML = '失败';
+      st.metaEl.style.color = '#dc2626';
+      this.addLogEntry(id, '❌ ' + (message || '未知错误'));
+      st.logEl.classList.add('expanded');
+      st.logEl.scrollTop = st.logEl.scrollHeight;
+      // Show retry button
+      this._showAction(id, 'retry');
+    }
+
+    setStageCancelled(id) {
+      // Mark current active stage + all subsequent as cancelled
+      for (let i = id; i <= SSE_STAGES.length; i++) {
+        this._setStatus(i, 'cancelled');
+        const st = this.stages.get(i);
+        if (st && st.status === 'cancelled') {
+          st.metaEl.innerHTML = i === id ? '已取消' : '';
+        }
+      }
+      this._clearActions(id);
+    }
+
+    setStageProgress(id, message, pct) {
+      const st = this.stages.get(id);
+      if (!st) return;
+      const pctStr = pct != null ? ` (${pct}%)` : '';
+      st.metaEl.innerHTML = `<span class="duration">${escHtml(message)}${pctStr}</span>`;
+    }
+
+    addLogEntry(id, message) {
+      const st = this.stages.get(id || this.currentStageId);
+      if (!st) return;
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.textContent = message;
+      st.logEl.appendChild(entry);
+      if (st.logEl.classList.contains('expanded')) {
+        st.logEl.scrollTop = st.logEl.scrollHeight;
+      }
+      // Limit to 50 entries
+      while (st.logEl.children.length > 50) st.logEl.firstChild.remove();
+    }
+
+    _showAction(id, type) {
+      const st = this.stages.get(id);
+      if (!st) return;
+      st.actionsEl.innerHTML = '';
+      const btn = document.createElement('button');
+      btn.className = 'stage-btn';
+      if (type === 'cancel') {
+        btn.className += ' cancel-btn';
+        btn.textContent = '⏹ 取消';
+        btn.onclick = (e) => { e.stopPropagation(); cancelTask(); };
+        btn.id = 'cancelStageBtn';
+      } else if (type === 'retry') {
+        btn.className += ' retry-btn';
+        btn.textContent = '🔄 从此阶段重试';
+        btn.onclick = (e) => { e.stopPropagation(); retryFromStage(id); };
+      }
+      st.actionsEl.appendChild(btn);
+    }
+
+    _clearActions(id) {
+      const st = this.stages.get(id);
+      if (st) st.actionsEl.innerHTML = '';
+    }
+
+    updateFromPoll(stagesArray) {
+      if (!stagesArray) return;
+      stagesArray.forEach(s => {
+        switch (s.status) {
+          case 'active': this._setStatus(s.stage_id, 'active'); this.currentStageId = s.stage_id; break;
+          case 'done': this._setStatus(s.stage_id, 'done'); break;
+          case 'failed': this._setStatus(s.stage_id, 'failed'); break;
+          case 'cancelled': this._setStatus(s.stage_id, 'cancelled'); break;
+        }
+        if (s.meta) this.stages.get(s.stage_id).metaEl.textContent = s.meta;
+        if (s.duration_s) {
+          this.stages.get(s.stage_id).metaEl.innerHTML = formatElapsed(s.duration_s);
+        }
+      });
+    }
+
+    destroy() {
+      this.container.innerHTML = '';
+      this.stages.clear();
+    }
+  }
+
+  // ── SSE client ──────────────────────────────────────────────────────
+  function startSSE(vid) {
+    if (sseSource) { sseSource.close(); sseSource = null; }
+    if (typeof EventSource === 'undefined') {
+      // 浏览器不支持 SSE → 降级到轮询
+      startPolling();
+      return;
+    }
+    try {
+      sseSource = new EventSource('/api/status/' + vid + '/stream');
+
+      sseSource.addEventListener('stage_change', (e) => {
+        const d = JSON.parse(e.data);
+        if (d.status === 'active') timeline.setStageActive(d.stage_id);
+        else if (d.status === 'done') timeline.setStageDone(d.stage_id, d.duration_s, d.meta);
+        else if (d.status === 'failed') timeline.setStageFailed(d.stage_id, d.message);
+      });
+
+      sseSource.addEventListener('stage_progress', (e) => {
+        const d = JSON.parse(e.data);
+        timeline.setStageProgress(d.stage_id, d.message, d.pct);
+      });
+
+      sseSource.addEventListener('log', (e) => {
+        const d = JSON.parse(e.data);
+        timeline.addLogEntry(d.stage_id, d.message);
+      });
+
+      sseSource.addEventListener('pipeline_complete', (e) => {
+        const d = JSON.parse(e.data);
+        stopPolling(); sseSource.close(); sseSource = null;
+        // 所有阶段标记完成
+        SSE_STAGES.forEach(s => timeline.setStageDone(s.id));
+        onPipelineDone(d);
+      });
+
+      sseSource.addEventListener('pipeline_error', (e) => {
+        const d = JSON.parse(e.data);
+        stopPolling(); sseSource.close(); sseSource = null;
+        timeline.setStageFailed(d.stage_id || timeline.currentStageId, d.message);
+        showError(d.message || '处理失败');
+      });
+
+      sseSource.addEventListener('pipeline_cancelled', (e) => {
+        const d = JSON.parse(e.data);
+        stopPolling(); sseSource.close(); sseSource = null;
+        const sid = timeline.currentStageId || 1;
+        timeline.setStageCancelled(sid);
+        statusBadge.textContent = '已取消'; statusBadge.className = 'status-badge status-failed';
+        progressTitle.textContent = '⏹ 已取消';
+        onPipelineDone(d);
+      });
+
+      sseSource.onerror = () => {
+        // SSE 连接失败 → 降级到轮询
+        if (sseSource) { sseSource.close(); sseSource = null; }
+        if (!pollTimer) startPolling();
+      };
+    } catch (_) {
+      // EventSource 构造失败 → 降级到轮询
+      startPolling();
+    }
+  }
+
+  function onPipelineDone(d) {
+    const doneState = { status: 'done', output_path: d.output_path, completed_at: Date.now() / 1000 };
+    if (d.title) document.title = '[✓] ' + d.title + ' · video2listener';
+    else document.title = '[✓] video2listener';
+    updateUI(doneState);
+  }
+
+  async function cancelTask() {
+    if (!videoId) return;
+    const btn = document.getElementById('cancelStageBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '取消中…'; }
+    try {
+      await fetch('/api/cancel/' + videoId, { method: 'POST' });
+    } catch (_) {
+      if (btn) { btn.disabled = false; btn.textContent = '⏹ 取消'; }
+    }
+  }
+
+  function retryFromStage(stageId) {
+    // Map stage_id back to resume_from string
+    const resumeMap = { 3: 'text_ready', 4: 'translated', 5: 'tts_done' };
+    // Submit with force + resume_from (handled in U4)
+    const mode = document.querySelector('input[name="mode"]:checked')?.value || 'podcast';
+    returnToForm(false);
+    setTimeout(() => submitTask(true), 100);
+    // Store resume_from for next submit
+    sessionStorage.setItem('v2l_resumeFrom', resumeMap[stageId] || '');
+  }
 
   // ── 查询 LLM 模型 ──────────────────────────────────────────────────
   fetchModelsBtn.addEventListener('click', async () => {
@@ -369,12 +717,16 @@
     finally { fetchVoicesBtn.disabled = false; fetchVoicesBtn.textContent = '加载官方音色'; }
   });
 
-  // ── 轮询 ───────────────────────────────────────────────────────────
+  // ── 轮询（降级用） ─────────────────────────────────────────────────
   async function pollStatus() {
     try {
       const resp = await fetch(`/api/status/${videoId}`);
       if (!resp.ok) { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('连接中断'); } return; }
-      pollFailures = 0; updateUI(await resp.json());
+      pollFailures = 0;
+      const state = await resp.json();
+      // 用 stages 数组驱动时间线
+      if (state.stages && timeline) timeline.updateFromPoll(state.stages);
+      updateUI(state);
     } catch { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('网络异常'); } }
   }
   function startPolling() {
@@ -383,6 +735,7 @@
     if (startedAt) { updateElapsed(); elapsedTimer = setInterval(updateElapsed, 5000); }
   }
   function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer=null; } if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer=null; } }
+
   function updateElapsed() { if (!startedAt) return; metaInfo.textContent = `⏱️ 已用 ${formatElapsed((Date.now()/1000)-startedAt)}`; }
 
   function updateUI(state) {
@@ -391,28 +744,35 @@
     progressTitle.textContent = state.status==='processing'?'⏳ 处理中':state.status==='done'?'✅ 完成':state.status==='failed'?'❌ 失败':'⏳ 处理中';
     const parts = []; if (state.mode_label) parts.push(state.mode_label); if (state.video_id) parts.push(state.video_id);
     metaInfo.textContent = parts.join(' · ')+'  ';
-    const msgs = state.progress_messages||[];
-    if (msgs.length>0) { progressLog.innerHTML = msgs.map(m=>`<div class="entry">${escHtml(m)}</div>`).join(''); progressLog.scrollTop=progressLog.scrollHeight; }
     if (state.status==='done') {
-      stopPolling(); resultCard.classList.remove('hidden');
+      stopPolling();
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      resultCard.classList.remove('hidden');
       if (startedAt) { const sec=(state.completed_at||Date.now()/1000)-startedAt; elapsedFinal.textContent=`总耗时: ${formatElapsed(sec)}`; }
       downloadBtn.onclick=()=>{window.location.href=`/api/download/${videoId}`;};
       sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
     }
-    if (state.status==='failed') { stopPolling(); showError(state.error_message||'未知错误'); }
+    if (state.status==='failed') {
+      stopPolling();
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      showError(state.error_message||'未知错误');
+    }
   }
   function showError(msg) { errorCard.classList.remove('hidden'); errorMsg.textContent=msg; sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt'); }
 
   function returnToForm(clearUrl) {
     stopPolling();
+    if (sseSource) { sseSource.close(); sseSource = null; }
+    if (timeline) { timeline.destroy(); timeline = null; }
     formCard.classList.remove('hidden');
     progressCard.classList.add('hidden');
     resultCard.classList.add('hidden');
     errorCard.classList.add('hidden');
     submitBtn.disabled=false; submitBtn.textContent='开始处理';
-    progressLog.innerHTML=''; errorMsg.textContent=''; elapsedFinal.textContent='';
+    errorMsg.textContent=''; elapsedFinal.textContent='';
     if (clearUrl) $('url').value='';
     videoId=null; startedAt=null; pollFailures=0;
+    document.title = 'video2listener — YouTube 转中文 MP3 播客';
     sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
     $('url').focus();
   }
@@ -466,6 +826,7 @@
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           url, mode, force,
+          resume_from: sessionStorage.getItem('v2l_resumeFrom') || '',
           api_key: $('llmApiKey').value.trim(),
           base_url: $('llmBaseUrl').value.trim(),
           model: modelSelect.value,
@@ -493,8 +854,16 @@
     progressCard.classList.remove('hidden');
     statusBadge.textContent='排队中…'; statusBadge.className='status-badge status-queued';
     progressTitle.textContent='⏳ 处理中';
-    metaInfo.textContent=(data.mode_label||'')+' · '+videoId; progressLog.innerHTML='';
-    startPolling();
+    metaInfo.textContent=(data.mode_label||'')+' · '+videoId;
+
+    // 初始化时间线
+    timeline = new PipelineTimeline(pipelineTimeline);
+    document.title = '[●●●] video2listener';
+
+    // SSE 优先，降级到轮询
+    startSSE(videoId);
+    // 清除 retry 标记
+    sessionStorage.removeItem('v2l_resumeFrom');
   }
 
   newTaskBtn.addEventListener('click', () => returnToForm(true));
