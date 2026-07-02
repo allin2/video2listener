@@ -31,9 +31,9 @@ def _sanitize_filename(name: str) -> str:
 def _resolve_title(video_id: str, data_dir: Path) -> str:
     """解析视频标题用于目录命名。
 
-    1. force 重跑：从 DB 已有记录取标题
-    2. 首次运行：尝试从 metadata.json 读取
-    3. 都没有：回退到 video_id
+    1. 从 DB 已有记录取标题
+    2. 尝试从 metadata.json 读取
+    3. 都没有：回退到 yt-dlp → video_id
     """
     episode = db.get_episode(video_id)
     if episode and episode.get("title_original"):
@@ -43,8 +43,12 @@ def _resolve_title(video_id: str, data_dir: Path) -> str:
     if meta_path.exists():
         import json
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("title"):
-            return _sanitize_filename(meta["title"])
+        title = meta.get("title", "")
+        if title:
+            # 修复 DB 中缺失的标题
+            if episode:
+                db.update_status(video_id, episode.get("status", "new"), title_original=title)
+            return _sanitize_filename(title)
 
     # 新视频：先快速获取标题
     try:
@@ -409,7 +413,19 @@ def _process_impl(
 
             progress(f"合并 {len(segments)} 个音频片段...")
             episode = db.get_episode(video_id)
-            output_name = _sanitize_filename(episode.get("title_original", video_id) if episode else video_id)
+            # 优先用 DB 中的标题；为空时回退到 metadata.json → video_id
+            raw_title = (episode.get("title_original") if episode else None) or ""
+            if not raw_title.strip():
+                meta_path = data_dir / "metadata.json"
+                if meta_path.exists():
+                    try:
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        raw_title = meta.get("title", video_id)
+                    except Exception:
+                        raw_title = video_id
+                else:
+                    raw_title = video_id
+            output_name = _sanitize_filename(raw_title)
             output_base = data_dir / output_name
             output_files = merge(segments, output_base, on_progress=progress)
 
