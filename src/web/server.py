@@ -632,6 +632,106 @@ async def api_status(video_id: str):
     return JSONResponse({"error": "任务不存在"}, status_code=404)
 
 
+@app.get("/api/tasks")
+async def api_tasks():
+    """列出所有历史任务（含进行中的内存状态）。"""
+    episodes = db.get_all_episodes()
+    result = []
+
+    # 合并内存状态
+    with _task_lock:
+        live_states = dict(_task_states)  # shallow copy under lock
+
+    for ep in episodes:
+        vid = ep["video_id"]
+        entry = {
+            "video_id": vid,
+            "title_original": ep.get("title_original") or "",
+            "channel_name": ep.get("channel_name") or "",
+            "mode": ep.get("mode", ""),
+            "mode_label": MODE_LABELS.get(ep.get("mode", ""), ""),
+            "status": ep.get("status", "new"),
+            "duration_seconds": ep.get("duration_seconds") or 0,
+            "data_dir": ep.get("data_dir") or "",
+            "audio_zh_path": ep.get("audio_zh_path") or "",
+            "updated_at": ep.get("updated_at") or "",
+        }
+
+        # 覆盖进行中的内存状态
+        if vid in live_states:
+            ls = live_states[vid]
+            entry["status"] = ls.get("status", entry["status"])
+            if ls.get("mode_label"):
+                entry["mode_label"] = ls["mode_label"]
+
+        # 检测多 Part MP3 文件
+        entry["parts"] = _detect_parts(entry["data_dir"], entry["audio_zh_path"])
+
+        result.append(entry)
+
+    return result
+
+
+def _detect_parts(data_dir: str, primary_path: str) -> list[dict]:
+    """检测 data_dir 中的多 Part MP3 文件。返回下载链接列表。"""
+    parts = []
+    if not data_dir:
+        return parts
+    d = Path(data_dir)
+    if not d.is_dir():
+        return parts
+
+    # 扫描 *_Part*.mp3
+    part_files = sorted(d.glob("*_Part*.mp3"), key=lambda p: p.name)
+    for pf in part_files:
+        parts.append({"filename": pf.name, "path": str(pf)})
+
+    # 主 MP3（如果不是 Part 文件）
+    if primary_path:
+        pp = Path(primary_path)
+        if pp.exists() and pp.suffix == ".mp3" and "Part" not in pp.stem:
+            parts.insert(0, {"filename": pp.name, "path": str(pp)})
+    elif not parts:
+        # 没有 primary_path，扫描目录下普通 mp3
+        for mp3 in sorted(d.glob("*.mp3")):
+            if "Part" not in mp3.stem:
+                parts.append({"filename": mp3.name, "path": str(mp3)})
+
+    return parts
+
+
+@app.delete("/api/tasks/{video_id}")
+async def api_delete_task(video_id: str):
+    """删除任务记录及 WAV 文件，保留转写/翻译中间产物。"""
+    # 拒绝删除进行中的任务
+    with _task_lock:
+        live = _task_states.get(video_id)
+    if live and live.get("status") in ("queued", "processing"):
+        return JSONResponse(
+            {"error": "任务正在处理中，无法删除。请先取消任务"},
+            status_code=409,
+        )
+
+    episode = db.get_episode(video_id)
+    if not episode:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    data_dir = episode.get("data_dir") or ""
+    if data_dir:
+        d = Path(data_dir)
+        if d.is_dir():
+            # 删除所有 WAV 文件
+            for wav in d.glob("*.wav"):
+                try:
+                    wav.unlink()
+                    logger.info("Deleted WAV: %s", wav)
+                except OSError as e:
+                    logger.warning("Failed to delete WAV %s: %s", wav, e)
+
+    db.delete_episode(video_id)
+    return {"video_id": video_id, "deleted": True}
+
+
 @app.get("/api/download/{video_id}")
 async def api_download(video_id: str):
     """下载生成的 MP3 文件。"""
