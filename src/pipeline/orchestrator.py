@@ -75,6 +75,7 @@ def process(
     on_progress: Optional[Callable[[str], None]] = None,
     llm_config: Optional[dict] = None,
     tts_config: Optional[dict] = None,
+    cancel_event=None,
 ) -> dict:
     """执行完整的处理管道。
 
@@ -85,9 +86,10 @@ def process(
         on_progress: 进度回调 (message: str)
         llm_config: 动态 LLM 配置 {"api_key": "...", "base_url": "...", "model": "..."}
         tts_config: 动态 TTS 配置 {"provider": "edge"|"openai", "voice": "...", "api_key": "..."}
+        cancel_event: threading.Event 取消信号
 
     Returns:
-        {"status": "done"|"failed", "video_id": str, "output_path": str|None, "message": str}
+        {"status": "done"|"failed"|"cancelled", "video_id": str, "output_path": str|None, "message": str}
     """
     # 并发防护
     with _lock:
@@ -96,10 +98,31 @@ def process(
         _active_tasks.add(video_id)
 
     try:
-        return _process_impl(video_id, mode, force, on_progress, llm_config, tts_config)
+        return _process_impl(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event)
     finally:
         with _lock:
             _active_tasks.discard(video_id)
+
+
+def _check_cancel(cancel_event, progress) -> bool:
+    """检查取消信号。返回 True 表示已取消。"""
+    if cancel_event and cancel_event.is_set():
+        progress("⏹ 用户取消，正在清理...")
+        return True
+    return False
+
+
+def _cleanup_post_translation(data_dir: Path):
+    """删除翻译阶段之后的产物，保留下载 + 转写 + 清洗结果。"""
+    import shutil
+    for f in list(data_dir.glob("*")):
+        name = f.name
+        if name in ("script_zh.txt", "summary.json", "tts_text.txt", "_concat_list.txt"):
+            f.unlink()
+        elif name.endswith(".mp3"):
+            f.unlink()
+        elif name == "tts_segments" and f.is_dir():
+            shutil.rmtree(f)
 
 
 def _process_impl(
@@ -109,6 +132,7 @@ def _process_impl(
     on_progress: Optional[Callable[[str], None]],
     llm_config: Optional[dict] = None,
     tts_config: Optional[dict] = None,
+    cancel_event=None,
 ) -> dict:
     cfg = get_config()
     root = cfg["_project_root"]
@@ -210,6 +234,12 @@ def _process_impl(
                 break
 
     try:
+        # --- Cancel check before metadata ---
+        if _check_cancel(cancel_event, progress):
+            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                    "message": "用户取消", "resumable_from": "new"}
+
         # --- Stage: metadata ---
         if _should_run(current_status, TaskStatus.METADATA_FETCHED):
             progress("获取视频信息...")
@@ -229,6 +259,12 @@ def _process_impl(
             except Exception as e:
                 progress(f"获取视频信息失败: {e}")
                 raise
+
+        # --- Cancel check before text ---
+        if _check_cancel(cancel_event, progress):
+            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                    "message": "用户取消", "resumable_from": "metadata_fetched"}
 
         # --- Stage: text ---
         if _should_run(current_status, TaskStatus.TEXT_READY):
@@ -283,6 +319,12 @@ def _process_impl(
             current_status = TaskStatus.TEXT_READY
             progress(f"文本清洗完成 ({len(cleaned)} 字符)")
 
+        # --- Cancel check before translation ---
+        if _check_cancel(cancel_event, progress):
+            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                    "message": "用户取消", "resumable_from": "text_ready"}
+
         # --- Stage: translate ---
         if _should_run(current_status, TaskStatus.TRANSLATED):
             episode = db.get_episode(video_id)
@@ -316,6 +358,13 @@ def _process_impl(
             current_status = TaskStatus.TRANSLATED
             progress("翻译完成")
 
+        # --- Cancel check before TTS ---
+        if _check_cancel(cancel_event, progress):
+            _cleanup_post_translation(data_dir)
+            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                    "message": "用户取消", "resumable_from": "translated"}
+
         # --- Stage: TTS ---
         if _should_run(current_status, TaskStatus.TTS_DONE):
             episode = db.get_episode(video_id)
@@ -331,6 +380,13 @@ def _process_impl(
 
             progress("开始语音合成...")
             segments = synthesize(tts_text, tts_dir, on_progress=progress, tts_config=tts_config)
+
+            # --- Cancel check before merge ---
+            if _check_cancel(cancel_event, progress):
+                _cleanup_post_translation(data_dir)
+                db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+                return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                        "message": "用户取消", "resumable_from": "translated"}
 
             progress(f"合并 {len(segments)} 个音频片段...")
             episode = db.get_episode(video_id)

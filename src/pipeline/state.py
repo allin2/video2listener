@@ -13,6 +13,7 @@ class TaskStatus(str, Enum):
     TTS_DONE = "tts_done"
     DONE = "done"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # 状态流转顺序

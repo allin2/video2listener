@@ -106,6 +106,8 @@ def _set_task_state(video_id: str, **kwargs):
                 "completed_stages": set(),
                 "stage_started_at": {},
                 "stage_meta": {},
+                # Cancel
+                "cancel_event": threading.Event(),
             }
             _task_states[video_id] = entry
         entry.update(kwargs)
@@ -445,7 +447,16 @@ async def api_process(request: Request):
         def progress(msg: str):
             _append_progress(video_id, msg)
 
-        result = run_pipeline(video_id, mode, force=force, on_progress=progress, llm_config=llm_config, tts_config=tts_config)
+        # 获取 cancel_event
+        with _task_lock:
+            entry = _task_states.get(video_id)
+            cancel_event = entry.get("cancel_event") if entry else None
+
+        result = run_pipeline(
+            video_id, mode, force=force, on_progress=progress,
+            llm_config=llm_config, tts_config=tts_config,
+            cancel_event=cancel_event,
+        )
 
         if result["status"] == "done" and result["output_path"]:
             _set_task_state(
@@ -461,6 +472,19 @@ async def api_process(request: Request):
                 "video_id": video_id,
                 "output_path": result["output_path"],
                 "title": title,
+            })
+        elif result["status"] == "cancelled":
+            _set_task_state(
+                video_id,
+                status="cancelled",
+                error_message=result.get("message", "用户取消"),
+                completed_at=time.time(),
+            )
+            # 发射 pipeline_cancelled
+            resumable_from = result.get("resumable_from", "translated")
+            _emit_sse_event(video_id, "pipeline_cancelled", {
+                "video_id": video_id,
+                "resumable_from": resumable_from,
             })
         else:
             error_msg = result.get("message", "未知错误")
@@ -488,6 +512,23 @@ async def api_process(request: Request):
         "mode": mode,
         "mode_label": mode_label,
     }
+
+
+@app.post("/api/cancel/{video_id}")
+async def api_cancel(video_id: str):
+    """取消正在处理的任务。保留下载和转写阶段的产物，清理翻译及之后的产物。"""
+    with _task_lock:
+        entry = _task_states.get(video_id)
+        if entry is None:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        status = entry.get("status", "")
+        if status not in ("queued", "processing"):
+            return JSONResponse({"error": "任务未在运行中", "status": status}, status_code=409)
+        cancel_event = entry.get("cancel_event")
+        if cancel_event and not cancel_event.is_set():
+            cancel_event.set()
+
+    return {"video_id": video_id, "status": "cancelling"}
 
 
 @app.get("/api/status/{video_id}/stream")
@@ -570,6 +611,7 @@ async def api_status(video_id: str):
             "tts_done": "processing",
             "done": "done",
             "failed": "failed",
+            "cancelled": "cancelled",
         }
         return {
             "video_id": video_id,
