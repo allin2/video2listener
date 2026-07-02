@@ -245,6 +245,8 @@
     line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
   }
   .help-tooltip.show { display: block; }
+  .field-error input, .field-error select { border-color: #dc2626 !important; }
+  .field-error .err-msg { color: #dc2626; font-size: 0.75rem; margin-top: 0.18rem; }
   .security-banner {
     display: flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.75rem;
     background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px;
@@ -1049,11 +1051,68 @@
   }
 
   // ── 提交 ────────────────────────────────────────────────────────────
+  // ── 客户端校验 ──────────────────────────────────────────────────────
+  function clearFieldErrors() {
+    document.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
+    document.querySelectorAll('.err-msg').forEach(el => el.remove());
+  }
+
+  function showFieldError(fieldId, msg) {
+    const field = $(fieldId);
+    if (!field) return;
+    const group = field.closest('.form-group');
+    if (!group) return;
+    group.classList.add('field-error');
+    const err = document.createElement('div');
+    err.className = 'err-msg';
+    err.textContent = msg;
+    group.appendChild(err);
+  }
+
+  function validateForm() {
+    clearFieldErrors();
+    const errors = [];
+
+    // URL 格式校验
+    const url = $('url').value.trim();
+    if (!url) {
+      showFieldError('url', '请输入 YouTube 链接');
+      errors.push('url');
+    } else {
+      const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/i;
+      const idPattern = /^[\w-]{11}$/;
+      if (!ytPattern.test(url) && !idPattern.test(url)) {
+        showFieldError('url', '链接格式无效。支持: youtube.com/watch?v=xxx / youtu.be/xxx / 纯视频 ID');
+        errors.push('url');
+      }
+    }
+
+    // LLM API Key 校验
+    const apiKey = $('llmApiKey').value.trim();
+    if (!apiKey) {
+      showFieldError('llmApiKey', '请输入 LLM API Key（翻译需要）');
+      errors.push('llmApiKey');
+    }
+
+    // 模型校验
+    if (!modelSelect.value) {
+      showFieldError('modelSelect', '请先点击「查询模型」获取可用模型列表');
+      errors.push('modelSelect');
+    }
+
+    // 聚焦第一个错误字段
+    if (errors.length > 0) {
+      $(errors[0]).focus();
+      return false;
+    }
+    return true;
+  }
+
   submitForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (!validateForm()) return;
     const url = $('url').value.trim();
     const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
-    if (!url) { alert('请输入 YouTube 链接'); return; }
     saveConfig();
     submitBtn.disabled=true; submitBtn.textContent='提交中…';
     try {
