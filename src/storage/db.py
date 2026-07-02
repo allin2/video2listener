@@ -51,6 +51,15 @@ def init_db() -> None:
             updated_at TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS glossary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            term_en TEXT UNIQUE,
+            term_zh TEXT,
+            source_video_id TEXT,
+            created_at TEXT
+        )
+    """)
     conn.commit()
     conn.close()
     logger.info("Database initialized at %s", _get_db_path())
@@ -170,3 +179,26 @@ def delete_episode(video_id: str) -> bool:
     deleted = cursor.rowcount > 0
     conn.close()
     return deleted
+
+
+def upsert_glossary_term(term_en: str, term_zh: str, source_video_id: str) -> None:
+    """插入或更新术语表条目。term_en 为唯一键，重复时替换。"""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO glossary (term_en, term_zh, source_video_id, created_at)
+           VALUES (?, ?, ?, datetime('now'))""",
+        (term_en, term_zh, source_video_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_glossary(limit: int = 30) -> list[dict]:
+    """获取术语表，按创建时间倒序，最多返回 limit 条。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM glossary ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

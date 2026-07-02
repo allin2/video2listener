@@ -2,7 +2,9 @@
 
 import json
 import logging
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -274,6 +276,11 @@ def translate(
     if metadata:
         meta_str = f"\n视频标题: {metadata.get('title', '')}\n频道: {metadata.get('channel', '')}\n"
 
+    # 注入术语表
+    glossary_str = _load_glossary()
+    if glossary_str:
+        meta_str = meta_str + "\n" + glossary_str + "\n"
+
     # 分段：按段落边界，每段 < 4000 tokens（估算 ~3000 英文词）
     paragraphs = text.split("\n\n")
     segments: list[str] = []
@@ -400,3 +407,103 @@ def summarize(
                 raise RuntimeError(f"摘要生成失败，已重试 {retries} 次: {e}")
 
     return {"title_zh": "", "summary": "", "key_points": []}
+
+
+def _load_glossary() -> str:
+    """加载术语表并格式化为 prompt 注入字符串。
+    返回 "术语表:\\n- term_en → term_zh\\n- ..." 或空字符串。
+    """
+    from src.storage import db
+
+    db.init_db()
+    terms = db.get_glossary(limit=30)
+    if not terms:
+        return ""
+    lines = ["术语表（请优先使用以下译法）:"]
+    for t in terms:
+        zh = t.get("term_zh", "")
+        if zh:
+            lines.append(f"- {t['term_en']} → {zh}")
+        else:
+            lines.append(f"- {t['term_en']}")
+    return "\n".join(lines)
+
+
+def _extract_terms(script_zh_path: str) -> None:
+    """从中文译文中启发式提取术语并写入 glossary。
+
+    扫描中文文本中的英文词汇（专有名词、技术缩写、混合大小写词），
+    统计词频，出现 ≥3 次的术语自动 upsert 到 glossary 表。
+    """
+    from src.storage import db
+
+    path = Path(script_zh_path)
+    if not path.exists():
+        logger.warning("_extract_terms: file not found %s", script_zh_path)
+        return
+
+    text = path.read_text(encoding="utf-8")
+
+    # 提取英文术语候选
+    # Pattern 1: 多词大写短语 (如 "Machine Learning", "Retrieval-Augmented Generation")
+    pattern_cap_phrase = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
+    # Pattern 2: 技术缩写 (如 RAG, LLM, API, GPU)
+    pattern_abbrev = re.compile(r"\b([A-Z]{2,}(?:s)?)\b")
+    # Pattern 3: 混合大小写词 (如 arXiv, iOS, ChatGPT)
+    pattern_mixed = re.compile(r"\b([A-Z][a-zA-Z]*[a-z][A-Z][a-zA-Z]*)\b")
+    # Pattern 4: 英文词后跟中文括号注释: "word（中文）" → term_en=word, term_zh=中文
+    pattern_zh_gloss = re.compile(r"([A-Za-z][A-Za-z0-9\s\-+]{1,40}?)[（(]([^）)]+)[）)]")
+
+    candidates: list[str] = []
+    candidates.extend(pattern_cap_phrase.findall(text))
+    candidates.extend(pattern_abbrev.findall(text))
+    candidates.extend(pattern_mixed.findall(text))
+
+    # 从括号注释中提取明确的术语-译文对，直接 upsert
+    source_video_id = path.parent.name
+    db.init_db()
+    for match in pattern_zh_gloss.finditer(text):
+        en_term = match.group(1).strip()
+        zh_term = match.group(2).strip()
+        if len(en_term) > 1 and len(zh_term) > 0:
+            db.upsert_glossary_term(en_term, zh_term, source_video_id)
+            logger.info("Glossary (explicit): '%s' -> '%s'", en_term, zh_term)
+            candidates.append(en_term)
+
+    # 过滤常见非术语词
+    stop_words = {
+        "The", "This", "That", "But", "And", "However", "Therefore",
+        "There", "These", "Those", "Then", "Also", "Here", "Just",
+        "Very", "Really", "Still", "Already", "Always", "Never",
+    }
+    candidates = [c for c in candidates if c not in stop_words and len(c) > 1]
+
+    # 统计词频
+    freq = Counter(candidates)
+
+    # Upsert 出现 ≥3 次的术语
+    for term, count in freq.items():
+        if count >= 3:
+            term_zh = _find_chinese_context(text, term)
+            db.upsert_glossary_term(term, term_zh, source_video_id)
+            logger.info("Glossary (auto): '%s' -> '%s' (%d occurrences)", term, term_zh, count)
+
+
+def _find_chinese_context(text: str, term_en: str) -> str:
+    """在文本中查找英文术语附近的汉语上下文，作为翻译候选。"""
+    idx = text.find(term_en)
+    if idx == -1:
+        return ""
+
+    # 取术语前后各 20 个字符作为上下文窗口
+    start = max(0, idx - 20)
+    end = min(len(text), idx + len(term_en) + 20)
+    context = text[start:end]
+
+    # 提取窗口中的中文字符序列
+    chinese_chars = re.findall(r"[一-鿿]+", context)
+    if chinese_chars:
+        # 返回最长的中文片段作为翻译候选
+        return max(chinese_chars, key=len)
+
+    return ""

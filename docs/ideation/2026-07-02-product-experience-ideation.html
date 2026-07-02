@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>video2listener 产品体验优化 — 创意输出</title>
+<style>
+  :root { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; max-width: 900px; margin: 0 auto; padding: 2rem 1rem; background: #fafafa; }
+  h1 { font-size: 1.8rem; border-bottom: 2px solid #2563eb; padding-bottom: 0.5rem; }
+  h2 { font-size: 1.3rem; margin-top: 2rem; color: #2563eb; }
+  h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+  .meta { color: #666; font-size: 0.9rem; margin-bottom: 2rem; }
+  .idea { background: #fff; border-radius: 8px; padding: 1.2rem 1.5rem; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,.08); border-left: 4px solid #2563eb; }
+  .idea h3 { margin: 0 0 0.4rem; font-size: 1.15rem; }
+  .idea .rank { display: inline-block; background: #2563eb; color: #fff; border-radius: 50%; width: 28px; height: 28px; text-align: center; line-height: 28px; font-weight: 700; font-size: 0.85rem; margin-right: 0.5rem; vertical-align: middle; }
+  .idea .axis { font-size: 0.8rem; color: #666; background: #f0f4ff; padding: 2px 8px; border-radius: 4px; margin-left: 0.5rem; }
+  .idea .conf { font-size: 0.8rem; font-weight: 600; }
+  .conf-high { color: #059669; } .conf-med { color: #d97706; }
+  .idea .rationale { color: #555; font-size: 0.9rem; margin: 0.6rem 0 0; }
+  .idea .basis { font-size: 0.8rem; color: #888; margin-top: 0.4rem; border-top: 1px solid #eee; padding-top: 0.4rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+  th { background: #f8fafc; font-weight: 600; }
+  .reject { background: #fef2f2; color: #991b1b; font-size: 0.85rem; }
+  .axes { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0; }
+  .axis-tag { background: #e0e7ff; color: #3730a3; padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; }
+  .summary-box { background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 1rem 1.5rem; margin: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1>video2listener · 产品体验优化</h1>
+<p class="meta">
+  <strong>2026-07-02</strong> ·
+  模式：repo-grounded ·
+  22 原始观点 → 7 个保留 · 5 个维度
+</p>
+
+<h2>Grounding Context</h2>
+
+<h3>Codebase Context</h3>
+<p>Python FastAPI + 单文件 HTML/JS SPA。管道 6 阶段：元数据获取 → 字幕提取/Whisper 转写 → LLM 翻译 → TTS 合成 → MP3 合并。内存状态 + SQLite 持久化，前端 2 秒轮询进度，localStorage 存配置。</p>
+
+<h3>Topic Axes</h3>
+<div class="axes">
+  <span class="axis-tag">提交流程</span>
+  <span class="axis-tag">进度反馈</span>
+  <span class="axis-tag">结果获取</span>
+  <span class="axis-tag">错误恢复</span>
+  <span class="axis-tag">任务管理</span>
+</div>
+
+<h3>Key Pain Points (from codebase scan)</h3>
+<ol>
+  <li>无预估时间、无分阶段进度，只轮询刷文本日志 (index.html:378-395)</li>
+  <li>API Key 明文存 localStorage，无安全提示 (index.html:254-262)</li>
+  <li>原生 confirm() 弹窗阻断 UI，不提供直接下载 (index.html:447-449)</li>
+  <li>提交不校验模型/URL，服务器才报错 (index.html:423-425)</li>
+  <li>失败后进度日志丢弃，无恢复机制 (index.html:402, orchestrator.py:356)</li>
+  <li>无取消功能、无任务历史、刷新恢复脆弱</li>
+</ol>
+
+<h2>Ranked Ideas</h2>
+
+<div class="idea">
+  <h3><span class="rank">1</span> 管道可视化控制台 <span class="axis">进度反馈</span> <span class="conf conf-high">Conf: High</span></h3>
+  <p>用 SSE 替换 2 秒轮询，前端渲染分阶段管道视图。每个阶段一个节点（下载→转写→清洗→翻译→TTS→合并），蓝色=进行中带 spinner，绿色=完成带耗时，红色=失败。点击节点展开该阶段日志。借鉴 GitHub Actions workflow 可视化模式。</p>
+  <p class="rationale"><strong>为什么重要：</strong>用户最频繁的体验就是等待。从"看着一行行日志滚"变成"看一眼就知道在哪、还要多久"，是把焦虑变成可控感的核心杠杆。SSE 同时消除轮询延迟和无效请求。</p>
+  <p class="basis"><strong>Basis:</strong> direct: index.html:378-395 当前轮询只是文本展示；external: GitHub Actions CI pipeline 可视化是业界标准</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">2</span> 一键从失败阶段恢复 <span class="axis">错误恢复</span> <span class="conf conf-high">Conf: High</span></h3>
+  <p>失败时不丢弃进度。利用已有的文件检查点（transcript_clean.txt、script_zh.txt 等）判断哪些阶段已完成，在错误卡片上展示"已完成：下载/转写"+"失败于：TTS 合成 Segment 18"，并提供"从此阶段重试"按钮，跳过已成功的阶段。</p>
+  <p class="rationale"><strong>为什么重要：</strong>当前整个 pipeline 报错后，用户除了看一条错误消息什么都做不了。30 分钟的进度白白浪费。利用已有的 check_stage_file 机制，这个功能的边际成本极低。</p>
+  <p class="basis"><strong>Basis:</strong> direct: state.py:38-57 check_stage_file 已实现每个阶段的文件标记；orchestrator.py:356 异常处理只记录 fail，不暴露已完成阶段</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">3</span> 自定义确认弹窗 + 直接下载 <span class="axis">提交流程</span> <span class="conf conf-high">Conf: High</span></h3>
+  <p>把原生 confirm() 替换为自定义 modal，弹窗中显示上次处理信息、直接提供"下载已有文件"按钮和"重新生成"按钮。支持键盘操作和移动端触摸。消除浏览器原生弹窗的阻断感。</p>
+  <p class="rationale"><strong>为什么重要：</strong>原生 confirm() 在移动端尤其糟糕，而且当前弹窗里完全没有利用返回的 output_path——用户确认了还得等新任务跑完才能下载。这是最小的改动产生最大的体感提升。</p>
+  <p class="basis"><strong>Basis:</strong> direct: index.html:447-449 confirm(data.message) 原生弹窗无下载入口；server.py:214 返回了 output_path 但前端未使用</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">4</span> 任务可取消 <span class="axis">任务管理</span> <span class="conf conf-med">Conf: Med</span></h3>
+  <p>在进度卡片上添加"取消"按钮。设置 threading.Event 中断标志，管道在每个阶段开始前和 TTS 每段合成前检查标志。取消后保留已完成文件，DB 状态设为 cancelled，前端显示"已取消"并提供"恢复"选项。</p>
+  <p class="rationale"><strong>为什么重要：</strong>当前一旦提交就失去控制权。用户选错模式、想换视频、或看到进度太慢，只能等它跑完或杀进程。取消是产品体验的基本权利。</p>
+  <p class="basis"><strong>Basis:</strong> direct: orchestrator.py:67-68 已有 _active_tasks + threading.Lock 锁机制，可在检查点扩展；external: yt-dlp、ffmpeg 等工具都支持 Ctrl+C 中断</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">5</span> 多标签任务历史面板 <span class="axis">任务管理</span> <span class="conf conf-med">Conf: Med</span></h3>
+  <p>新增 GET /api/tasks 端点，列出所有历史任务（从 DB 查询，合并内存状态）。前端增加"历史"标签页，表格显示视频标题、模式、状态、时间、文件大小，支持下载/删除。结果卡片展示文件名、大小、预估时长等元信息。</p>
+  <p class="rationale"><strong>为什么重要：</strong>当前你一刷新页面，刚生成的文件就"消失"了——没有地方查看/下载过去的结果。一个用户每天 1-2 个视频，一周就积累十几条记录。历史面板把"一次性工具"变成"持续使用的个人播客库"。</p>
+  <p class="basis"><strong>Basis:</strong> direct: server.py 当前无历史端点，DB 中已有完整的 episode 记录可用；merger.py:320 多 Part 文件只存了 [0]</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">6</span> 1Password 风格密钥管理 <span class="axis">提交流程</span> <span class="conf conf-med">Conf: Med</span></h3>
+  <p>API Key 输入框增加显示/隐藏切换按钮、一键复制。localStorage 保存区域增加醒目的安全说明（"密钥仅存于此浏览器本地，不会上传"），输入框旁边增加小问号图标 hover 显示说明。TTS 音色选择旁提供试听按钮（播放 5 秒示例）。</p>
+  <p class="rationale"><strong>为什么重要：</strong>用户每次打开页面都要面对"我要把密钥填进这个本地工具安全吗"的心理摩擦。增加可见的安全说明和标准的密钥输入 UX ，消除这种不安。</p>
+  <p class="basis"><strong>Basis:</strong> direct: index.html:254-262 密钥明文存 localStorage 但只有一行小字提示；external: 1Password/密码管理器 UI 模式是行业标准</p>
+</div>
+
+<div class="idea">
+  <h3><span class="rank">7</span> 提交前客户端校验 <span class="axis">提交流程</span> <span class="conf conf-high">Conf: High</span></h3>
+  <p>点击"开始处理"时前端先校验：YouTube URL 格式（支持 youtu.be / watch?v= / 纯 ID）、模型是否已选择、至少 LLM API Key 已填写。不合法时在对应字段旁标红并显示提示文字，焦点移到第一个错误字段。避免提交到服务器才报错。</p>
+  <p class="rationale"><strong>为什么重要：</strong>零成本消除一大类用户错误。当前未选模型提交 → 服务器用空字符串尝试翻译 → 报错。这个校验能拦截所有当前已观察到的无效提交。</p>
+  <p class="basis"><strong>Basis:</strong> direct: index.html:423-425 只检查 URL 非空，不校验格式；server.py:175 空 model 字符串仍会尝试使用</p>
+</div>
+
+<h2>Rejection Summary</h2>
+<table>
+<thead><tr><th>#</th><th>Idea</th><th>Reason</th></tr></thead>
+<tbody>
+<tr class="reject"><td>4</td><td>下载按钮防重复点击</td><td>tactical — 可并入 #5（任务历史面板里做）</td></tr>
+<tr class="reject"><td>6</td><td>失败后保留进度</td><td>duplicates #2（一键从失败恢复已覆盖）</td></tr>
+<tr class="reject"><td>8</td><td>自动填写上次配置</td><td>duplicates #15 — 合并到模型列表缓存</td></tr>
+<tr class="reject"><td>9</td><td>拖拽 YouTube 链接</td><td>nice-to-have，不影响核心体验</td></tr>
+<tr class="reject"><td>10</td><td>Web Notification 通知</td><td>需权限请求，对本地工具价值有限</td></tr>
+<tr class="reject"><td>12</td><td>离线优先 Service Worker 缓存</td><td>too expensive — 实现复杂，用户有本地文件</td></tr>
+<tr class="reject"><td>14</td><td>零配置模式</td><td>scope overrun — 需要本地 LLM 检测，偏离产品体验 track</td></tr>
+<tr class="reject"><td>15</td><td>模型列表本地缓存</td><td>too small — 可并入 #6 或单独 quick fix</td></tr>
+<tr class="reject"><td>16</td><td>管道耗时分析面板</td><td>属于「管道效率」track 而非产品体验</td></tr>
+<tr class="reject"><td>17</td><td>快捷重新处理</td><td>tactical — 可并入 #5</td></tr>
+<tr class="reject"><td>18</td><td>输出文件信息预览</td><td>merged into #5（结果卡片元信息）</td></tr>
+<tr class="reject"><td>19</td><td>CI/CD 管道视图</td><td>merged into #1（管道可视化控制台）</td></tr>
+<tr class="reject"><td>20</td><td>npm 日志风格</td><td>merged into #1 的子功能</td></tr>
+<tr class="reject"><td>22</td><td>待播清单</td><td>interesting but premature — 基础体验夯实后再做</td></tr>
+</tbody>
+</table>
+
+<p style="margin-top: 2rem; color: #888; font-size: 0.85rem;">
+  22 raw ideas across 5 frames → 15 cut/merged → 7 survivors. Next: pick one for <code>ce-brainstorm</code>.
+</p>
+
+</body>
+</html>

@@ -12,7 +12,7 @@ from src.pipeline.state import TaskStatus, check_stage_file
 from src.youtube.extractor import extract as youtube_extract, check_connectivity
 from src.transcription.cleaner import clean as clean_text
 from src.transcription.transcriber import transcribe as whisper_transcribe
-from src.translation.client import translate as llm_translate, summarize as llm_summarize
+from src.translation.client import translate as llm_translate, summarize as llm_summarize, _extract_terms
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize
 from src.audio.merger import merge
@@ -362,6 +362,12 @@ def _process_impl(
             script_zh = llm_translate(clean_text_content, mode, metadata, on_progress=progress, llm_config=llm_config)
             script_path = data_dir / "script_zh.txt"
             script_path.write_text(script_zh, encoding="utf-8")
+
+            # 从译文中提取术语，写入 glossary
+            try:
+                _extract_terms(str(script_path))
+            except Exception as e:
+                logger.warning("术语提取失败（非致命）: %s", e)
 
             progress("生成摘要...")
             try:
