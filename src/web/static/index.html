@@ -160,6 +160,68 @@
   .modal-regenerate { background: #e0e7ff; color: #4f46e5; }
   .modal-regenerate:hover { background: #c7d2fe; }
 
+  /* ── History Drawer ────────────────────────────────────────────────── */
+  .header-row { display: flex; align-items: center; justify-content: space-between; }
+  .btn-history {
+    width: auto; padding: 0.4rem 0.85rem; border: 1.5px solid #ddd; border-radius: 8px;
+    background: #fff; font-size: 0.88rem; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-history:hover { border-color: #4f46e5; color: #4f46e5; }
+  .history-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3);
+    z-index: 1001; justify-content: flex-end;
+  }
+  .history-overlay.open { display: flex; }
+  .history-drawer {
+    width: 380px; max-width: 90vw; height: 100%; background: #fff;
+    box-shadow: -2px 0 16px rgba(0,0,0,0.12); display: flex; flex-direction: column;
+    transform: translateX(100%); transition: transform 0.25s ease-out;
+  }
+  .history-overlay.open .history-drawer { transform: translateX(0); }
+  .history-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1rem 1.2rem; border-bottom: 1px solid #eee; flex-shrink: 0;
+  }
+  .history-header h3 { font-size: 1rem; margin: 0; }
+  .history-close {
+    width: 32px; height: 32px; border: none; background: none; font-size: 1.3rem;
+    cursor: pointer; color: #888; border-radius: 6px; display: flex; align-items: center; justify-content: center;
+  }
+  .history-close:hover { background: #f0f0f0; color: #333; }
+  .history-list { flex: 1; overflow-y: auto; padding: 0.5rem 0; }
+  .history-empty { text-align: center; color: #999; padding: 2rem 1rem; font-size: 0.9rem; }
+  .task-row {
+    padding: 0.65rem 1.2rem; border-bottom: 1px solid #f5f5f5; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .task-row:hover { background: #f9fafb; }
+  .task-row-main { display: flex; align-items: center; gap: 0.5rem; }
+  .task-row-title { flex: 1; font-size: 0.85rem; font-weight: 600; color: #1a1a1a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-row-badge { font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+  .badge-podcast { background: #e0e7ff; color: #4f46e5; }
+  .badge-faithful { background: #fef3c7; color: #92400e; }
+  .badge-condensed { background: #fce7f3; color: #9d174d; }
+  .task-row-status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot-done { background: #16a34a; }
+  .status-dot-failed { background: #dc2626; }
+  .status-dot-cancelled { background: #9ca3af; }
+  .status-dot-processing { background: #4f46e5; animation: stagePulse 1.5s ease-in-out infinite; }
+  .task-row-actions { display: flex; gap: 0.3rem; margin-left: 0.5rem; }
+  .task-row-icon {
+    width: 28px; height: 28px; border: none; background: none; cursor: pointer;
+    border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
+  }
+  .task-row-icon:hover { background: #f0f0f0; }
+  .task-row-icon.del:hover { background: #fef2f2; color: #dc2626; }
+  .task-row-detail { display: none; margin-top: 0.45rem; padding-top: 0.45rem; border-top: 1px solid #f0f0f0; font-size: 0.78rem; color: #6b7280; }
+  .task-row.expanded .task-row-detail { display: block; }
+  .task-row-detail span { display: block; margin-bottom: 0.15rem; }
+  .task-row-confirm { display: none; gap: 0.4rem; margin-top: 0.35rem; }
+  .task-row.confirming .task-row-confirm { display: flex; }
+  .task-row.confirming .task-row-actions { display: none; }
+  .task-row-fade { opacity: 0; transform: translateX(20px); transition: all 0.3s; }
+  .history-footer { padding: 0.6rem 1.2rem; border-top: 1px solid #eee; font-size: 0.78rem; color: #999; flex-shrink: 0; }
+
   @media (max-width: 480px) {
     body { padding: 1rem 0.5rem; }
     .card { padding: 1rem; }
@@ -173,8 +235,13 @@
 <body>
 <div class="container">
   <header>
-    <h1>🎧 video2listener</h1>
-    <p>英文 YouTube 视频 → 中文 MP3 播客</p>
+    <div class="header-row">
+      <div>
+        <h1>🎧 video2listener</h1>
+        <p>英文 YouTube 视频 → 中文 MP3 播客</p>
+      </div>
+      <button class="btn-history" id="historyBtn">📋 历史</button>
+    </div>
   </header>
 
   <div class="card" id="formCard">
@@ -302,6 +369,20 @@
         <button class="btn modal-download" id="modalDownloadBtn">⬇️ 下载已有文件</button>
         <button class="btn modal-regenerate" id="modalRegenerateBtn">🔄 重新生成</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 历史记录抽屉 -->
+  <div class="history-overlay" id="historyOverlay">
+    <div class="history-drawer" id="historyDrawer">
+      <div class="history-header">
+        <h3>📋 历史记录</h3>
+        <button class="history-close" id="historyCloseBtn">✕</button>
+      </div>
+      <div class="history-list" id="historyList">
+        <div class="history-empty">加载中…</div>
+      </div>
+      <div class="history-footer" id="historyFooter"></div>
     </div>
   </div>
 </div>
@@ -965,9 +1046,157 @@
 
   // 键盘支持
   document.addEventListener('keydown', (e) => {
-    if (!duplicateModal.classList.contains('open')) return;
-    if (e.key === 'Escape') { e.preventDefault(); closeDuplicateModal(); }
-    if (e.key === 'Enter') { e.preventDefault(); modalDownloadBtn.click(); }
+    if (duplicateModal.classList.contains('open')) {
+      if (e.key === 'Escape') { e.preventDefault(); closeDuplicateModal(); }
+      if (e.key === 'Enter') { e.preventDefault(); modalDownloadBtn.click(); }
+    }
+    if (historyOverlay.classList.contains('open')) {
+      if (e.key === 'Escape') { e.preventDefault(); closeHistoryDrawer(); }
+    }
+  });
+
+  // ── 历史记录抽屉 ────────────────────────────────────────────────────
+  const historyBtn = $('historyBtn');
+  const historyOverlay = $('historyOverlay');
+  const historyDrawer = $('historyDrawer');
+  const historyList = $('historyList');
+  const historyFooter = $('historyFooter');
+  const historyCloseBtn = $('historyCloseBtn');
+  let _historyCache = [];
+
+  async function openHistoryDrawer() {
+    historyOverlay.classList.add('open');
+    historyList.innerHTML = '<div class="history-empty">加载中…</div>';
+    try {
+      const resp = await fetch('/api/tasks');
+      if (!resp.ok) throw new Error('Failed');
+      _historyCache = await resp.json();
+      renderHistoryList(_historyCache);
+    } catch (_) {
+      historyList.innerHTML = '<div class="history-empty">加载失败，请重试</div>';
+    }
+  }
+
+  function closeHistoryDrawer() {
+    historyOverlay.classList.remove('open');
+  }
+
+  function renderHistoryList(tasks) {
+    historyList.innerHTML = '';
+    if (tasks.length === 0) {
+      historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+      historyFooter.textContent = '';
+      return;
+    }
+    historyFooter.textContent = `共 ${tasks.length} 条记录`;
+
+    const MODE_CLASS = { podcast: 'badge-podcast', faithful: 'badge-faithful', condensed: 'badge-condensed' };
+    const STATUS_CLASS = { done: 'status-dot-done', failed: 'status-dot-failed', cancelled: 'status-dot-cancelled', processing: 'status-dot-processing', queued: 'status-dot-processing' };
+
+    tasks.forEach(t => {
+      const row = document.createElement('div');
+      row.className = 'task-row';
+      row.dataset.videoId = t.video_id;
+
+      const dateStr = (t.updated_at || '').slice(0, 10);
+      const title = t.title_original || t.video_id;
+      const titleShort = title.length > 40 ? title.slice(0, 40) + '…' : title;
+      const modeLabel = t.mode_label || t.mode || '';
+      const statusDot = STATUS_CLASS[t.status] || 'status-dot-done';
+      const modeCls = MODE_CLASS[t.mode] || '';
+
+      // Estimate file size from duration
+      const estMB = t.duration_seconds ? Math.round(t.duration_seconds * 128 / 8 / 1024) : '?';
+      const partsHTML = t.parts && t.parts.length > 0
+        ? t.parts.map(p => `<a href="/api/download/${t.video_id}" style="color:#4f46e5;">📥 ${escHtml(p.filename)}</a>`).join('<br>')
+        : (t.audio_zh_path ? '<span style="color:#9ca3af;">文件已不存在</span>' : '<span style="color:#9ca3af;">未生成</span>');
+
+      row.innerHTML = `
+        <div class="task-row-main">
+          <span class="task-row-status ${statusDot}"></span>
+          <span class="task-row-title" title="${escHtml(title)}">${escHtml(titleShort)}</span>
+          ${modeLabel ? `<span class="task-row-badge ${modeCls}">${escHtml(modeLabel)}</span>` : ''}
+          <span style="font-size:0.72rem;color:#9ca3af;">${dateStr}</span>
+          <div class="task-row-actions">
+            ${(t.parts && t.parts.length > 0 || t.audio_zh_path) ? '<button class="task-row-icon" title="下载">⬇️</button>' : ''}
+            <button class="task-row-icon del" title="删除">🗑️</button>
+          </div>
+        </div>
+        <div class="task-row-detail">
+          <span>📺 ${escHtml(t.channel_name || '未知频道')}</span>
+          <span>⏱ ${t.duration_seconds ? Math.floor(t.duration_seconds/60)+' 分钟' : '未知'}</span>
+          <span>📦 约 ${estMB} MB</span>
+          <span>${partsHTML}</span>
+        </div>
+        <div class="task-row-confirm">
+          <span style="font-size:0.8rem;color:#dc2626;">确认删除？</span>
+          <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;color:#dc2626;">确认</button>
+          <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;">取消</button>
+        </div>
+      `;
+
+      // Click row → toggle expand
+      row.querySelector('.task-row-main').addEventListener('click', () => {
+        row.classList.toggle('expanded');
+      });
+
+      // Download button
+      const dlBtn = row.querySelector('.task-row-icon:not(.del)');
+      if (dlBtn) {
+        dlBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          window.location.href = '/api/download/' + t.video_id;
+        });
+      }
+
+      // Delete button → show confirm
+      const delBtn = row.querySelector('.task-row-icon.del');
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        row.classList.add('confirming');
+      });
+
+      // Confirm delete
+      const confirmBtns = row.querySelectorAll('.task-row-confirm button');
+      confirmBtns[0].addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const resp = await fetch('/api/tasks/' + t.video_id, { method: 'DELETE' });
+          if (resp.ok) {
+            row.classList.add('task-row-fade');
+            setTimeout(() => {
+              row.remove();
+              _historyCache = _historyCache.filter(x => x.video_id !== t.video_id);
+              historyFooter.textContent = `共 ${_historyCache.length} 条记录`;
+              if (_historyCache.length === 0) {
+                historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+              }
+            }, 300);
+          } else {
+            const err = await resp.json();
+            alert('删除失败: ' + (err.error || '未知错误'));
+            row.classList.remove('confirming');
+          }
+        } catch (_) {
+          alert('网络错误');
+          row.classList.remove('confirming');
+        }
+      });
+
+      // Cancel delete
+      confirmBtns[1].addEventListener('click', (e) => {
+        e.stopPropagation();
+        row.classList.remove('confirming');
+      });
+
+      historyList.appendChild(row);
+    });
+  }
+
+  historyBtn.addEventListener('click', openHistoryDrawer);
+  historyCloseBtn.addEventListener('click', closeHistoryDrawer);
+  historyOverlay.addEventListener('click', (e) => {
+    if (e.target === historyOverlay) closeHistoryDrawer();
   });
 })();
 </script>
