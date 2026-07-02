@@ -61,6 +61,8 @@ def synthesize(
     total = len(segments)
 
     provider = (tts_config or {}).get("provider", "edge")
+    use_ssml = (tts_config or {}).get("use_ssml", True)
+    speed = (tts_config or {}).get("speed", 1.0)
     extension = ".wav" if provider == "mimi" else ".mp3"
 
     if concurrency > 1:
@@ -68,7 +70,7 @@ def synthesize(
             future_to_index: dict = {}
             for i, seg in enumerate(segments):
                 out_path = output_dir / f"segment_{i:04d}{extension}"
-                future = executor.submit(_synthesize_segment, seg, out_path, tts_config)
+                future = executor.submit(_synthesize_segment, seg, out_path, tts_config, use_ssml, speed)
                 future_to_index[future] = (i, out_path)
 
             results: dict[int, Path] = {}
@@ -96,7 +98,7 @@ def synthesize(
                 on_progress(f"TTS 合成中... ({i + 1}/{total})")
 
             try:
-                _synthesize_segment(seg, out_path, tts_config)
+                _synthesize_segment(seg, out_path, tts_config, use_ssml, speed)
                 audio_files.append(out_path)
             except Exception as e:
                 logger.error("TTS segment %d failed: %s", i, e)
@@ -106,11 +108,12 @@ def synthesize(
     return audio_files
 
 
-def _synthesize_segment(text: str, output_path: Path, tts_config: Optional[dict] = None) -> None:
+def _synthesize_segment(text: str, output_path: Path, tts_config: Optional[dict] = None,
+                        use_ssml: bool = True, speed: float = 1.0) -> None:
     """合成单个文本段为音频。
 
     根据 tts_config 路由到不同 TTS 引擎：
-    - edge: Edge TTS (免费，默认)
+    - edge: Edge TTS (免费，默认，支持 SSML)
     - openai: OpenAI TTS (使用上方 API Key)
     - mimi: Mimi TTS (默认回退)
     """
@@ -119,23 +122,27 @@ def _synthesize_segment(text: str, output_path: Path, tts_config: Optional[dict]
     if provider == "openai":
         _openai_tts(text, output_path, tts_config)
     elif provider == "mimi":
-        _mimi_tts(text, output_path, tts_config)
+        _mimi_tts(text, output_path, tts_config, speed=speed)
     elif provider == "edge":
-        _edge_tts_fallback(text, output_path)
+        _edge_tts(text, output_path, use_ssml=use_ssml)
     else:
         try:
-            _mimi_tts(text, output_path, tts_config)
+            _mimi_tts(text, output_path, tts_config, speed=speed)
         except Exception:
             logger.warning("Mimi TTS failed, falling back to edge-tts", exc_info=True)
-            _edge_tts_fallback(text, output_path)
+            _edge_tts(text, output_path, use_ssml=use_ssml)
 
 
-def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None) -> None:
+def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
+              speed: float = 1.0) -> None:
     """调用 MiMo Chat Completions TTS，并解码返回的 Base64 WAV。"""
     api_key = (tts_config or {}).get("api_key", "")
     base_url = (tts_config or {}).get("base_url", "https://api.xiaomimimo.com/v1")
     model = (tts_config or {}).get("model", "mimo-v2.5-tts")
     voice = (tts_config or {}).get("voice", "苏打")
+
+    # Clamp speed to MiMo supported range 0.25-4.0
+    speed = max(0.25, min(4.0, speed))
 
     endpoint = base_url.rstrip("/") + "/chat/completions"
 
@@ -147,6 +154,7 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None) -
         "audio": {
             "format": "wav",
             "voice": voice,
+            "speed": speed,
         },
     }).encode("utf-8")
 
@@ -211,8 +219,8 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None) -
     logger.info("Mimi TTS: model=%s voice=%s -> %s (size=%d)", model, voice, output_path, output_path.stat().st_size)
 
 
-def _edge_tts_fallback(text: str, output_path: Path) -> None:
-    """Edge TTS 回退方案（开发/测试用，免费）。"""
+def _edge_tts(text: str, output_path: Path, use_ssml: bool = True) -> None:
+    """Edge TTS 方案（开发/测试用，免费），支持 SSML 增强自然度。"""
     import asyncio
     import edge_tts
 
@@ -228,12 +236,20 @@ def _edge_tts_fallback(text: str, output_path: Path) -> None:
 
     rate_str = f"{int((rate - 1) * 100):+d}%" if rate != 1.0 else "+0%"
 
+    # SSML 文本预处理：用 break 标签替换换行和长破折号，提升自然度
+    tts_input = text
+    if use_ssml:
+        tts_input = text.replace("——", '<break time="300ms"/>')
+        tts_input = tts_input.replace("\n\n", '<break time="800ms"/>')
+        tts_input = tts_input.replace("\n", '<break time="400ms"/>')
+        tts_input = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN">{tts_input}</speak>'
+
     async def _run():
         # Edge TTS 走直连，清除代理环境变量（否则会被代理拦截导致 SSL 错误）
         import os as _os
         old_proxies = {k: _os.environ.pop(k, None) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+            communicate = edge_tts.Communicate(tts_input, voice, rate=rate_str)
             await communicate.save(str(output_path))
         finally:
             for k, v in old_proxies.items():

@@ -48,6 +48,9 @@ def clean_for_tts(text: str) -> str:
     # 添加停顿标记（句间空行）
     result = "\n".join(s.strip() for s in sentences if s.strip())
 
+    # 后处理：精细停顿标记
+    result = _add_pause_markers(result)
+
     return result
 
 
@@ -96,3 +99,87 @@ def _split_by_comma(text: str, max_chars: int) -> list[str]:
         result.append(current)
 
     return result if result else [text]
+
+
+def _add_pause_markers(text: str) -> str:
+    """Post-process cleaned TTS text to insert natural pause markers.
+
+    Runs after the main cleaning pass. Converts punctuation into TTS-friendly
+    segment boundaries and pause markers:
+    - 。？！： → newline (segment boundary / end-of-sentence pause)
+    - ； → ，， (comma-length pause, softer than newline)
+    - Normalises consecutive blank lines (max 2)
+    - Merges ultrashort segments (< 5 chars) with adjacent lines
+    """
+    # Step 1: Convert ； splits back into ，， pauses.
+    # _split_long_sentences splits on ； into separate lines; we want a softer pause.
+    text = re.sub(r"；\n", "；，，", text)
+    # Also handle ； at end of text (no newline follows)
+    text = re.sub(r"；$", "；，，", text)
+
+    # Step 2: ： should act as a segment boundary (colon introduces speech or lists).
+    text = re.sub(r"：", "：\n", text)
+
+    # Step 3: Safeguard — ensure 。？！ are always followed by a newline.
+    text = re.sub(r"([。？！])(?!\n)", r"\1\n", text)
+
+    # Step 4: Normalise consecutive blank lines — keep at most 2.
+    lines = text.split("\n")
+    normalised: list[str] = []
+    blank_run = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            blank_run += 1
+            if blank_run <= 2:
+                normalised.append("")
+        else:
+            blank_run = 0
+            normalised.append(stripped)
+
+    # Step 5: Merge ultrashort fragments (< 5 chars) with adjacent lines.
+    merged = _merge_ultrashort_lines(normalised)
+
+    return "\n".join(merged)
+
+
+def _merge_ultrashort_lines(lines: list[str]) -> list[str]:
+    """Merge non-empty lines shorter than 5 characters with adjacent lines."""
+    if not lines:
+        return lines
+
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Preserve blank lines (spacing between segments).
+        if not line:
+            result.append(line)
+            i += 1
+            continue
+
+        if len(line) >= 5:
+            result.append(line)
+            i += 1
+            continue
+
+        # Ultrashort line (< 5 chars, non-empty): absorb following non-empty lines.
+        merged = line
+        i += 1
+        while i < len(lines) and lines[i]:
+            merged += lines[i]
+            i += 1
+
+        # If still too short, prepend to the previous non-empty line in result.
+        if len(merged) < 5:
+            for j in range(len(result) - 1, -1, -1):
+                if result[j]:
+                    result[j] = result[j] + merged
+                    merged = ""
+                    break
+
+        if merged:
+            result.append(merged)
+
+    return result

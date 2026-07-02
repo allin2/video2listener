@@ -79,7 +79,7 @@ def _concat_segments(segments: list[Path], output: Path, bitrate: str) -> None:
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(concat_list),
-        "-af", "loudnorm=I=-16:LRA=11:TP=-1.5",
+        "-af", "loudnorm=I=-16:LRA=11:TP=-1.5,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-15|-27/-9|0/-7|20/-7:gain=5,afade=t=in:d=0.1,afade=t=out:d=0.3",
         "-b:a", bitrate,
         "-ar", "44100",
         "-ac", "1",
