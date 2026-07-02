@@ -140,6 +140,26 @@
   .stage-btn.retry-btn { color: #4f46e5; border-color: #c7d2fe; }
   .stage-btn.retry-btn:hover { background: #f0efff; border-color: #4f46e5; }
 
+  /* ── Duplicate Modal ───────────────────────────────────────────────── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 1000; justify-content: center; align-items: center; padding: 1rem;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: #fff; border-radius: 12px; padding: 1.5rem; max-width: 400px; width: 100%;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.15); animation: modalIn 0.2s ease-out;
+  }
+  @keyframes modalIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+  .modal-box h3 { font-size: 1.05rem; margin-bottom: 0.6rem; color: #1a1a1a; }
+  .modal-box p { font-size: 0.9rem; color: #555; margin-bottom: 1.2rem; line-height: 1.5; }
+  .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
+  .modal-actions .btn { width: 100%; margin: 0; }
+  .modal-download { background: #16a34a; color: #fff; }
+  .modal-download:hover { background: #15803d; }
+  .modal-regenerate { background: #e0e7ff; color: #4f46e5; }
+  .modal-regenerate:hover { background: #c7d2fe; }
+
   @media (max-width: 480px) {
     body { padding: 1rem 0.5rem; }
     .card { padding: 1rem; }
@@ -271,6 +291,18 @@
     <h2>❌ 处理失败</h2>
     <p class="error-msg" id="errorMsg"></p>
     <button class="btn btn-primary" id="retryBtn" style="margin-top: 1rem;">重新开始</button>
+  </div>
+
+  <!-- 重复视频弹窗 -->
+  <div class="modal-overlay" id="duplicateModal">
+    <div class="modal-box">
+      <h3>📼 视频已处理过</h3>
+      <p id="duplicateMsg">该视频之前已处理过，是否重新生成？</p>
+      <div class="modal-actions">
+        <button class="btn modal-download" id="modalDownloadBtn">⬇️ 下载已有文件</button>
+        <button class="btn modal-regenerate" id="modalRegenerateBtn">🔄 重新生成</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -825,12 +857,10 @@
       });
       const data = await resp.json();
 
-      // 重复视频 → 弹确认框
+      // 重复视频 → 自定义弹窗
       if (resp.ok && data.status === 'duplicate') {
         submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        if (confirm(data.message || '该视频已处理过，是否重新生成？')) {
-          submitTask(true);  // force=true
-        }
+        showDuplicateModal(data.message, data.output_path);
         return;
       }
 
@@ -864,7 +894,7 @@
       const data = await resp.json();
       if (resp.ok && data.status === 'duplicate') {
         submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        if (confirm(data.message || '该视频已处理过，是否重新生成？')) { submitTask(true); }
+        showDuplicateModal(data.message, data.output_path);
         return;
       }
       if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
@@ -894,6 +924,51 @@
 
   newTaskBtn.addEventListener('click', () => returnToForm(true));
   retryBtn.addEventListener('click', () => returnToForm(false));
+
+  // ── 重复视频弹窗 ────────────────────────────────────────────────────
+  const duplicateModal = $('duplicateModal');
+  const duplicateMsg = $('duplicateMsg');
+  const modalDownloadBtn = $('modalDownloadBtn');
+  const modalRegenerateBtn = $('modalRegenerateBtn');
+  let _duplicateOutputPath = '';
+
+  function showDuplicateModal(message, outputPath) {
+    duplicateMsg.textContent = message || '该视频之前已处理过，是否重新生成？';
+    _duplicateOutputPath = outputPath || '';
+    duplicateModal.classList.add('open');
+    modalDownloadBtn.focus();
+  }
+
+  function closeDuplicateModal() {
+    duplicateModal.classList.remove('open');
+    _duplicateOutputPath = '';
+  }
+
+  modalDownloadBtn.addEventListener('click', () => {
+    if (_duplicateOutputPath) {
+      // 直接用 output_path 构造下载 URL
+      window.location.href = '/api/download/' + videoId;
+    }
+    closeDuplicateModal();
+    returnToForm(true);
+  });
+
+  modalRegenerateBtn.addEventListener('click', () => {
+    closeDuplicateModal();
+    submitTask(true);
+  });
+
+  // 点击遮罩关闭
+  duplicateModal.addEventListener('click', (e) => {
+    if (e.target === duplicateModal) closeDuplicateModal();
+  });
+
+  // 键盘支持
+  document.addEventListener('keydown', (e) => {
+    if (!duplicateModal.classList.contains('open')) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeDuplicateModal(); }
+    if (e.key === 'Enter') { e.preventDefault(); modalDownloadBtn.click(); }
+  });
 })();
 </script>
 </body>
