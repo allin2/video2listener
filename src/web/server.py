@@ -427,8 +427,11 @@ async def api_process(request: Request):
 
     mode_label = MODE_LABELS[mode]
 
-    # 初始化任务状态
+    # 初始化任务状态（新任务：重置 cancel_event 避免旧取消状态残留）
     now = time.time()
+    # 清除旧 entry（如果有）以确保 cancel_event/SSE 队列都是全新的
+    with _task_lock:
+        _task_states.pop(video_id, None)
     _set_task_state(
         video_id,
         status="queued",
