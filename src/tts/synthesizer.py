@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.config import get_config
 
@@ -18,6 +19,7 @@ def synthesize(
     output_dir: Path,
     on_progress: Optional[callable] = None,
     tts_config: Optional[dict] = None,
+    concurrency: int = 3,
 ) -> list[Path]:
     """将中文文本合成为音频片段。
 
@@ -28,6 +30,7 @@ def synthesize(
         output_dir: 片段输出目录
         on_progress: 进度回调
         tts_config: 动态 TTS 配置 {"provider": "edge"|"openai", "voice": "...", "api_key": "..."}
+        concurrency: 并发合成线程数（默认 3）。设为 1 使用顺序合成（向后兼容）
 
     Returns:
         音频片段文件路径列表
@@ -60,18 +63,44 @@ def synthesize(
     provider = (tts_config or {}).get("provider", "edge")
     extension = ".wav" if provider == "mimi" else ".mp3"
 
-    for i, seg in enumerate(segments):
-        out_path = output_dir / f"segment_{i:04d}{extension}"
+    if concurrency > 1:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_index: dict = {}
+            for i, seg in enumerate(segments):
+                out_path = output_dir / f"segment_{i:04d}{extension}"
+                future = executor.submit(_synthesize_segment, seg, out_path, tts_config)
+                future_to_index[future] = (i, out_path)
 
-        if on_progress:
-            on_progress(f"TTS 合成中... ({i + 1}/{total})")
+            results: dict[int, Path] = {}
+            completed_count = 0
+            try:
+                for future in as_completed(future_to_index):
+                    i, out_path = future_to_index[future]
+                    future.result()
+                    results[i] = out_path
+                    completed_count += 1
+                    if on_progress:
+                        on_progress(f"TTS 合成中... ({completed_count}/{total})")
+            except Exception as e:
+                logger.error("TTS segment %d failed: %s", i, e)
+                for f in future_to_index:
+                    f.cancel()
+                raise RuntimeError(f"TTS 合成失败 (segment {i}): {e}") from e
 
-        try:
-            _synthesize_segment(seg, out_path, tts_config)
-            audio_files.append(out_path)
-        except Exception as e:
-            logger.error("TTS segment %d failed: %s", i, e)
-            raise RuntimeError(f"TTS 合成失败 (segment {i}): {e}")
+            audio_files = [results[k] for k in sorted(results)]
+    else:
+        for i, seg in enumerate(segments):
+            out_path = output_dir / f"segment_{i:04d}{extension}"
+
+            if on_progress:
+                on_progress(f"TTS 合成中... ({i + 1}/{total})")
+
+            try:
+                _synthesize_segment(seg, out_path, tts_config)
+                audio_files.append(out_path)
+            except Exception as e:
+                logger.error("TTS segment %d failed: %s", i, e)
+                raise RuntimeError(f"TTS 合成失败 (segment {i}): {e}")
 
     logger.info("TTS synthesis complete: %d segments", len(audio_files))
     return audio_files
