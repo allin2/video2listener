@@ -1,0 +1,21 @@
+[Unit]
+Description=video2listener - YouTube to Chinese Podcast Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/path/to/video2listener
+Environment=PATH=/path/to/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VIDEO2LISTENER_DEEPSEEK_API_KEY=
+Environment=VIDEO2LISTENER_FEISHU_APP_ID=
+Environment=VIDEO2LISTENER_FEISHU_APP_SECRET=
+Environment=VIDEO2LISTENER_MIMI_API_KEY=
+ExecStart=/path/to/venv/bin/uvicorn src.bot.server:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

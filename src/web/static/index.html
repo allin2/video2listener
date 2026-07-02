@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>video2listener — YouTube 转中文 MP3 播客</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f5f5; color: #333; line-height: 1.6;
+    min-height: 100vh; display: flex; justify-content: center; padding: 2rem 1rem;
+  }
+  .container { width: 100%; max-width: 640px; }
+  header { text-align: center; margin-bottom: 2rem; }
+  header h1 { font-size: 1.8rem; font-weight: 700; color: #1a1a1a; }
+  header p { color: #666; margin-top: 0.25rem; font-size: 0.95rem; }
+
+  .card {
+    background: #fff; border-radius: 12px; padding: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1rem;
+  }
+  .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: #1a1a1a; }
+
+  .form-group { margin-bottom: 0.85rem; }
+  .form-group label { display: block; font-weight: 600; margin-bottom: 0.3rem; font-size: 0.88rem; color: #444; }
+  .form-group input[type="text"], .form-group input[type="password"], .form-group select {
+    width: 100%; padding: 0.6rem 0.8rem; border: 1.5px solid #ddd;
+    border-radius: 8px; font-size: 0.92rem; transition: border-color 0.2s; background: #fff;
+  }
+  .form-group input:focus, .form-group select:focus { outline: none; border-color: #4f46e5; }
+  .form-row { display: flex; gap: 0.5rem; }
+  .form-row .form-group:first-child { flex: 1; }
+  .form-row .btn { width: auto; white-space: nowrap; padding: 0.6rem 0.9rem; font-size: 0.88rem; }
+
+  .section-hr { border: none; border-top: 1px solid #eee; margin: 1.2rem 0; }
+
+  .radio-group { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .radio-group label {
+    display: flex; align-items: center; gap: 0.35rem;
+    padding: 0.45rem 0.85rem; border: 1.5px solid #ddd; border-radius: 8px;
+    cursor: pointer; font-size: 0.9rem; transition: all 0.2s;
+  }
+  .radio-group label:hover { border-color: #4f46e5; background: #f8f7ff; }
+  .radio-group input[type="radio"]:checked + span { font-weight: 600; color: #4f46e5; }
+  .radio-group label:has(input:checked) { border-color: #4f46e5; background: #f0efff; }
+
+  .btn {
+    width: 100%; padding: 0.75rem; border: none; border-radius: 8px;
+    font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+  }
+  .btn:disabled { background: #c7c7c7 !important; cursor: not-allowed; }
+  .btn-primary { background: #4f46e5; color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #4338ca; }
+  .btn-secondary { background: #e0e7ff; color: #4f46e5; }
+  .btn-secondary:hover:not(:disabled) { background: #c7d2fe; }
+  .btn-download { background: #16a34a; color: #fff; margin-top: 0.75rem; }
+  .btn-download:hover { background: #15803d; }
+  .result-actions { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0.65rem; margin-top: 0.75rem; }
+  .result-actions .btn { margin-top: 0; }
+
+  .hint { font-size: 0.75rem; color: #999; margin-top: 0.18rem; }
+  .config-memory {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: 0.75rem 0.9rem; margin: 0.2rem 0 1rem;
+    border: 1px solid #e5e7eb; border-radius: 10px; background: #fafafa;
+  }
+  .config-memory label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.84rem; font-weight: 600; cursor: pointer; }
+  .config-memory input { width: 1rem; height: 1rem; accent-color: #4f46e5; }
+  .config-memory .memory-copy { flex: 1; }
+  .config-memory .memory-note { color: #8a8a8a; font-size: 0.72rem; font-weight: 400; margin-top: 0.12rem; }
+  .btn-text { width: auto; padding: 0.35rem 0.55rem; background: transparent; color: #6b7280; font-size: 0.78rem; }
+  .btn-text:hover { color: #dc2626; background: #fef2f2; }
+
+  .status-badge {
+    display: inline-block; padding: 0.2rem 0.75rem; border-radius: 20px;
+    font-size: 0.85rem; font-weight: 600;
+  }
+  .status-queued { background: #fef3c7; color: #92400e; }
+  .status-processing { background: #dbeafe; color: #1e40af; }
+  .status-done { background: #dcfce7; color: #166534; }
+  .status-failed { background: #fee2e2; color: #991b1b; }
+
+  .meta { font-size: 0.85rem; color: #888; margin: 0.25rem 0 0.75rem; }
+  .progress-log {
+    background: #f9fafb; border-radius: 8px; padding: 0.75rem;
+    max-height: 240px; overflow-y: auto; font-size: 0.88rem;
+  }
+  .progress-log .entry { padding: 0.2rem 0; border-bottom: 1px solid #f0f0f0; color: #555; }
+  .progress-log .entry:last-child { border-bottom: none; }
+  .error-msg { color: #dc2626; font-size: 0.9rem; white-space: pre-wrap; }
+  .hidden { display: none !important; }
+
+  @media (max-width: 480px) {
+    body { padding: 1rem 0.5rem; }
+    .card { padding: 1rem; }
+    header h1 { font-size: 1.4rem; }
+    .form-row { flex-direction: column; }
+    .config-memory { align-items: flex-start; }
+    .result-actions { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🎧 video2listener</h1>
+    <p>英文 YouTube 视频 → 中文 MP3 播客</p>
+  </header>
+
+  <div class="card" id="formCard">
+    <h2>⚙️ 配置 & 输入</h2>
+    <form id="submitForm" autocomplete="off">
+
+      <!-- ═══ LLM 翻译配置 ═══ -->
+      <fieldset style="border:1.5px solid #e0e7ff; border-radius:10px; padding:1rem 1rem 0.5rem; margin-bottom:1rem;">
+        <legend style="font-weight:700; color:#4f46e5; padding:0 0.4rem;">🤖 LLM 翻译配置</legend>
+        <div class="form-group">
+          <label for="llmApiKey">API Key</label>
+          <input type="password" id="llmApiKey" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="llmBaseUrl">Base URL</label>
+            <input type="text" id="llmBaseUrl" placeholder="https://api.deepseek.com" value="https://api.deepseek.com">
+          </div>
+          <div class="form-group" style="align-self: flex-end;">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-secondary" id="fetchModelsBtn">查询模型</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="modelSelect">模型</label>
+          <select id="modelSelect"><option value="">请先点击「查询模型」</option></select>
+        </div>
+      </fieldset>
+
+      <!-- ═══ TTS 语音配置 ═══ -->
+      <fieldset style="border:1.5px solid #d1fae5; border-radius:10px; padding:1rem 1rem 0.5rem; margin-bottom:1rem;">
+        <legend style="font-weight:700; color:#059669; padding:0 0.4rem;">🔊 TTS 语音配置</legend>
+        <div class="form-group">
+          <label for="ttsApiKey">API Key</label>
+          <input type="password" id="ttsApiKey" placeholder="sk-...（留空则使用免费 Edge TTS）">
+          <p class="hint">留空自动使用 Edge TTS（免费，无需 API Key）</p>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ttsBaseUrl">Base URL</label>
+            <input type="text" id="ttsBaseUrl" placeholder="https://api.xiaomimimo.com/v1" value="https://api.xiaomimimo.com/v1">
+          </div>
+          <div class="form-group" style="align-self: flex-end;">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-secondary" id="fetchVoicesBtn">加载官方音色</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ttsModel">模型</label>
+            <input type="text" id="ttsModel" placeholder="mimo-v2.5-tts" value="mimo-v2.5-tts">
+          </div>
+          <div class="form-group" style="flex:2;">
+            <label for="ttsVoice">音色</label>
+            <select id="ttsVoice">
+              <option value="冰糖">冰糖 · 中文女声</option>
+              <option value="茉莉">茉莉 · 中文女声</option>
+              <option value="苏打" selected>苏打 · 中文男声</option>
+              <option value="白桦">白桦 · 中文男声</option>
+              <option value="Mia">Mia · English female</option>
+              <option value="Chloe">Chloe · English female</option>
+              <option value="Milo">Milo · English male</option>
+              <option value="Dean">Dean · English male</option>
+            </select>
+          </div>
+        </div>
+      </fieldset>
+
+      <div class="config-memory">
+        <div class="memory-copy">
+          <label><input type="checkbox" id="rememberConfig" checked>在此浏览器记住配置</label>
+          <p class="memory-note">包含 API Key，仅保存在当前浏览器；不要在公共设备上启用。</p>
+        </div>
+        <button type="button" class="btn btn-text" id="clearConfigBtn">清除保存</button>
+      </div>
+
+      <!-- ═══ 视频输入 ═══ -->
+      <div class="form-group">
+        <label for="url">🔗 YouTube 链接</label>
+        <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=xxx 或 youtu.be/xxx">
+      </div>
+      <div class="form-group">
+        <label>🎙️ 输出模式</label>
+        <div class="radio-group">
+          <label><input type="radio" name="mode" value="podcast" checked><span>中文播客版</span></label>
+          <label><input type="radio" name="mode" value="faithful"><span>忠实翻译版</span></label>
+          <label><input type="radio" name="mode" value="condensed"><span>精华浓缩版</span></label>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary" id="submitBtn">开始处理</button>
+    </form>
+    <p style="margin-top: 0.75rem; font-size: 0.8rem; color: #aaa; text-align: center;">
+      处理通常需要 5–15 分钟，请耐心等待
+    </p>
+  </div>
+
+  <!-- 进度 / 结果 / 错误面板不变 -->
+  <div class="card hidden" id="progressCard">
+    <h2 id="progressTitle">⏳ 处理中</h2>
+    <span class="status-badge" id="statusBadge">排队中</span>
+    <p class="meta" id="metaInfo"></p>
+    <div class="progress-log" id="progressLog"></div>
+  </div>
+  <div class="card hidden" id="resultCard">
+    <h2>✅ 处理完成</h2>
+    <p style="color: #555; margin-bottom: 0.5rem;">音频已生成，点击下方按钮下载：</p>
+    <div class="result-actions">
+      <button class="btn btn-download" id="downloadBtn">⬇️ 下载 MP3</button>
+      <button class="btn btn-secondary" id="newTaskBtn">← 处理新视频</button>
+    </div>
+    <p style="margin-top: 0.5rem; font-size: 0.8rem; color: #aaa;" id="elapsedFinal"></p>
+  </div>
+  <div class="card hidden" id="errorCard">
+    <h2>❌ 处理失败</h2>
+    <p class="error-msg" id="errorMsg"></p>
+    <button class="btn btn-primary" id="retryBtn" style="margin-top: 1rem;">重新开始</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  let pollTimer = null, elapsedTimer = null, videoId = null, startedAt = null, pollFailures = 0;
+
+  const $ = id => document.getElementById(id);
+  const formCard = $('formCard'), progressCard = $('progressCard'), resultCard = $('resultCard'), errorCard = $('errorCard');
+  const submitForm = $('submitForm'), submitBtn = $('submitBtn');
+  const fetchModelsBtn = $('fetchModelsBtn'), fetchVoicesBtn = $('fetchVoicesBtn');
+  const modelSelect = $('modelSelect'), ttsVoice = $('ttsVoice');
+  const statusBadge = $('statusBadge'), metaInfo = $('metaInfo');
+  const progressLog = $('progressLog'), progressTitle = $('progressTitle');
+  const downloadBtn = $('downloadBtn'), errorMsg = $('errorMsg'), retryBtn = $('retryBtn');
+  const elapsedFinal = $('elapsedFinal'), newTaskBtn = $('newTaskBtn');
+  const rememberConfig = $('rememberConfig'), clearConfigBtn = $('clearConfigBtn');
+  const CONFIG_STORAGE_KEY = 'v2l_savedConfig_v1';
+
+  function setSelectValue(select, value) {
+    if (!value) return;
+    if (![...select.options].some(option => option.value === value)) {
+      select.add(new Option(value, value));
+    }
+    select.value = value;
+  }
+
+  function collectConfig() {
+    return {
+      llmApiKey: $('llmApiKey').value,
+      llmBaseUrl: $('llmBaseUrl').value,
+      model: modelSelect.value,
+      ttsApiKey: $('ttsApiKey').value,
+      ttsBaseUrl: $('ttsBaseUrl').value,
+      ttsModel: $('ttsModel').value,
+      ttsVoice: ttsVoice.value,
+      mode: document.querySelector('input[name="mode"]:checked')?.value || 'podcast',
+    };
+  }
+
+  function saveConfig() {
+    if (!rememberConfig.checked) return;
+    try { localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(collectConfig())); } catch { /* 浏览器可能禁用存储 */ }
+  }
+
+  function restoreConfig() {
+    try {
+      const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      rememberConfig.checked = true;
+      $('llmApiKey').value = saved.llmApiKey || '';
+      $('llmBaseUrl').value = saved.llmBaseUrl || 'https://api.deepseek.com';
+      setSelectValue(modelSelect, saved.model);
+      $('ttsApiKey').value = saved.ttsApiKey || '';
+      $('ttsBaseUrl').value = saved.ttsBaseUrl || 'https://api.xiaomimimo.com/v1';
+      $('ttsModel').value = saved.ttsModel || 'mimo-v2.5-tts';
+      setSelectValue(ttsVoice, saved.ttsVoice || '苏打');
+      const savedMode = ['podcast', 'faithful', 'condensed'].includes(saved.mode) ? saved.mode : 'podcast';
+      const modeInput = document.querySelector(`input[name="mode"][value="${savedMode}"]`);
+      if (modeInput) modeInput.checked = true;
+    } catch {
+      localStorage.removeItem(CONFIG_STORAGE_KEY);
+    }
+  }
+
+  restoreConfig();
+
+  submitForm.addEventListener('input', saveConfig);
+  submitForm.addEventListener('change', saveConfig);
+  rememberConfig.addEventListener('change', () => {
+    if (rememberConfig.checked) saveConfig();
+    else localStorage.removeItem(CONFIG_STORAGE_KEY);
+  });
+  clearConfigBtn.addEventListener('click', () => {
+    localStorage.removeItem(CONFIG_STORAGE_KEY);
+    rememberConfig.checked = false;
+    clearConfigBtn.textContent = '已清除';
+    setTimeout(() => { clearConfigBtn.textContent = '清除保存'; }, 1200);
+  });
+
+  // 恢复 session
+  const savedVideoId = sessionStorage.getItem('v2l_videoId');
+  if (savedVideoId) {
+    videoId = savedVideoId;
+    startedAt = parseFloat(sessionStorage.getItem('v2l_startedAt') || '0');
+    formCard.classList.add('hidden'); progressCard.classList.remove('hidden');
+    startPolling();
+  }
+
+  function formatElapsed(sec) {
+    if (sec < 60) return `${Math.floor(sec)} 秒`;
+    if (sec < 3600) { const m = Math.floor(sec/60), s = Math.floor(sec%60); return s>0 ? `${m}分${s}秒` : `${m}分钟`; }
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+    return m>0 ? `${h}小时${m}分钟` : `${h}小时`;
+  }
+  function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+  // ── 查询 LLM 模型 ──────────────────────────────────────────────────
+  fetchModelsBtn.addEventListener('click', async () => {
+    const apiKey = $('llmApiKey').value.trim();
+    const baseUrl = $('llmBaseUrl').value.trim() || 'https://api.deepseek.com';
+    const preferredModel = modelSelect.value;
+    if (!apiKey) { alert('请先输入 LLM API Key'); return; }
+    fetchModelsBtn.disabled = true; fetchModelsBtn.textContent = '查询中…';
+    modelSelect.innerHTML = '<option value="">查询中…</option>';
+    try {
+      const resp = await fetch('/api/models', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key:apiKey, base_url:baseUrl}) });
+      const data = await resp.json();
+      if (!resp.ok) { modelSelect.innerHTML = `<option value="">❌ ${data.error||'查询失败'}</option>`; }
+      else if ((data.models||[]).length===0) { modelSelect.innerHTML = '<option value="">未找到模型</option>'; }
+      else {
+        modelSelect.innerHTML = data.models.map(m => `<option value="${escHtml(m.id)}">${escHtml(m.id)}</option>`).join('');
+        if ([...modelSelect.options].some(option => option.value === preferredModel)) modelSelect.value = preferredModel;
+        saveConfig();
+      }
+    } catch { modelSelect.innerHTML = '<option value="">❌ 网络错误</option>'; }
+    finally { fetchModelsBtn.disabled = false; fetchModelsBtn.textContent = '查询模型'; }
+  });
+
+  // ── 查询 TTS 音色 ──────────────────────────────────────────────────
+  fetchVoicesBtn.addEventListener('click', async () => {
+    const apiKey = $('ttsApiKey').value.trim();
+    const baseUrl = $('ttsBaseUrl').value.trim() || 'https://api.xiaomimimo.com/v1';
+    const preferredVoice = ttsVoice.value || '苏打';
+    fetchVoicesBtn.disabled = true; fetchVoicesBtn.textContent = '查询中…';
+    ttsVoice.innerHTML = '<option value="">查询中…</option>';
+    try {
+      const resp = await fetch('/api/tts-voices', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key:apiKey, base_url:baseUrl}) });
+      const data = await resp.json();
+      if (!resp.ok) { ttsVoice.innerHTML = `<option value="">❌ ${data.error||'查询失败'}</option>`; }
+      else {
+        const voices = data.voices || [];
+        if (voices.length===0) { ttsVoice.innerHTML = '<option value="">未找到音色</option>'; }
+        else {
+          ttsVoice.innerHTML = voices.map(v => {
+            const sel = v.id===preferredVoice ? ' selected' : '';
+            return `<option value="${escHtml(v.id)}"${sel}>${escHtml(v.name||v.id)}</option>`;
+          }).join('');
+          if (![...ttsVoice.options].some(option => option.value === preferredVoice)) ttsVoice.value = '苏打';
+          saveConfig();
+        }
+      }
+    } catch { ttsVoice.innerHTML = '<option value="">❌ 网络错误</option>'; }
+    finally { fetchVoicesBtn.disabled = false; fetchVoicesBtn.textContent = '加载官方音色'; }
+  });
+
+  // ── 轮询 ───────────────────────────────────────────────────────────
+  async function pollStatus() {
+    try {
+      const resp = await fetch(`/api/status/${videoId}`);
+      if (!resp.ok) { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('连接中断'); } return; }
+      pollFailures = 0; updateUI(await resp.json());
+    } catch { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('网络异常'); } }
+  }
+  function startPolling() {
+    if (pollTimer) return;
+    pollStatus(); pollTimer = setInterval(pollStatus, 2000);
+    if (startedAt) { updateElapsed(); elapsedTimer = setInterval(updateElapsed, 5000); }
+  }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer=null; } if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer=null; } }
+  function updateElapsed() { if (!startedAt) return; metaInfo.textContent = `⏱️ 已用 ${formatElapsed((Date.now()/1000)-startedAt)}`; }
+
+  function updateUI(state) {
+    statusBadge.textContent = state.status==='queued'?'排队中…':state.status==='processing'?'处理中…':state.status==='done'?'已完成':state.status==='failed'?'失败':state.status;
+    statusBadge.className = 'status-badge status-'+state.status;
+    progressTitle.textContent = state.status==='processing'?'⏳ 处理中':state.status==='done'?'✅ 完成':state.status==='failed'?'❌ 失败':'⏳ 处理中';
+    const parts = []; if (state.mode_label) parts.push(state.mode_label); if (state.video_id) parts.push(state.video_id);
+    metaInfo.textContent = parts.join(' · ')+'  ';
+    const msgs = state.progress_messages||[];
+    if (msgs.length>0) { progressLog.innerHTML = msgs.map(m=>`<div class="entry">${escHtml(m)}</div>`).join(''); progressLog.scrollTop=progressLog.scrollHeight; }
+    if (state.status==='done') {
+      stopPolling(); resultCard.classList.remove('hidden');
+      if (startedAt) { const sec=(state.completed_at||Date.now()/1000)-startedAt; elapsedFinal.textContent=`总耗时: ${formatElapsed(sec)}`; }
+      downloadBtn.onclick=()=>{window.location.href=`/api/download/${videoId}`;};
+      sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+    }
+    if (state.status==='failed') { stopPolling(); showError(state.error_message||'未知错误'); }
+  }
+  function showError(msg) { errorCard.classList.remove('hidden'); errorMsg.textContent=msg; sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt'); }
+
+  function returnToForm(clearUrl) {
+    stopPolling();
+    formCard.classList.remove('hidden');
+    progressCard.classList.add('hidden');
+    resultCard.classList.add('hidden');
+    errorCard.classList.add('hidden');
+    submitBtn.disabled=false; submitBtn.textContent='开始处理';
+    progressLog.innerHTML=''; errorMsg.textContent=''; elapsedFinal.textContent='';
+    if (clearUrl) $('url').value='';
+    videoId=null; startedAt=null; pollFailures=0;
+    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+    $('url').focus();
+  }
+
+  // ── 提交 ────────────────────────────────────────────────────────────
+  submitForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const url = $('url').value.trim();
+    const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
+    if (!url) { alert('请输入 YouTube 链接'); return; }
+    saveConfig();
+    submitBtn.disabled=true; submitBtn.textContent='提交中…';
+    try {
+      const resp = await fetch('/api/process', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          url, mode,
+          api_key: $('llmApiKey').value.trim(),
+          base_url: $('llmBaseUrl').value.trim(),
+          model: modelSelect.value,
+          tts_api_key: $('ttsApiKey').value.trim(),
+          tts_base_url: $('ttsBaseUrl').value.trim(),
+          tts_model: $('ttsModel').value.trim(),
+          tts_voice: ttsVoice.value,
+        }),
+      });
+      const data = await resp.json();
+
+      // 重复视频 → 弹确认框
+      if (resp.ok && data.status === 'duplicate') {
+        submitBtn.disabled=false; submitBtn.textContent='开始处理';
+        if (confirm(data.message || '该视频已处理过，是否重新生成？')) {
+          submitTask(true);  // force=true
+        }
+        return;
+      }
+
+      if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
+      startProgressUI(data);
+    } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
+  });
+
+  async function submitTask(force) {
+    const url = $('url').value.trim();
+    const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
+    if (!url) { alert('请输入 YouTube 链接'); return; }
+    saveConfig();
+    submitBtn.disabled=true; submitBtn.textContent='提交中…';
+    try {
+      const resp = await fetch('/api/process', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          url, mode, force,
+          api_key: $('llmApiKey').value.trim(),
+          base_url: $('llmBaseUrl').value.trim(),
+          model: modelSelect.value,
+          tts_api_key: $('ttsApiKey').value.trim(),
+          tts_base_url: $('ttsBaseUrl').value.trim(),
+          tts_model: $('ttsModel').value.trim(),
+          tts_voice: ttsVoice.value,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.status === 'duplicate') {
+        submitBtn.disabled=false; submitBtn.textContent='开始处理';
+        if (confirm(data.message || '该视频已处理过，是否重新生成？')) { submitTask(true); }
+        return;
+      }
+      if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
+      startProgressUI(data);
+    } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
+  }
+
+  function startProgressUI(data) {
+    videoId=data.video_id; startedAt=Date.now()/1000;
+    sessionStorage.setItem('v2l_videoId',videoId); sessionStorage.setItem('v2l_startedAt',String(startedAt));
+    formCard.classList.add('hidden'); resultCard.classList.add('hidden'); errorCard.classList.add('hidden');
+    progressCard.classList.remove('hidden');
+    statusBadge.textContent='排队中…'; statusBadge.className='status-badge status-queued';
+    progressTitle.textContent='⏳ 处理中';
+    metaInfo.textContent=(data.mode_label||'')+' · '+videoId; progressLog.innerHTML='';
+    startPolling();
+  }
+
+  newTaskBtn.addEventListener('click', () => returnToForm(true));
+  retryBtn.addEventListener('click', () => returnToForm(false));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+# video2listener 配置文件
+# API keys 等敏感信息通过环境变量注入，不写在此文件中
+
+network:
+  proxy: http://127.0.0.1:7897   # HTTP/SOCKS5 代理，供 yt-dlp 访问 YouTube
+
+app:
+  name: video2listener
+  data_dir: ./data
+  db_path: ./db/tasks.db
+  log_level: INFO
+
+processing:
+  default_mode: podcast        # podcast | faithful | condensed
+  max_video_duration_minutes: 240
+  chunk_minutes: 8             # whisper 转写切分粒度
+  retry_times: 3
+  retry_backoff_base: 2        # 指数退避基数（秒）
+
+# --- 以下 credentials 通过环境变量覆盖 ---
+# VIDEO2LISTENER_DEEPSEEK_API_KEY
+# VIDEO2LISTENER_DEEPSEEK_BASE_URL
+# VIDEO2LISTENER_MIMI_API_KEY   (如 Mimi TTS 需要)
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
+  temperature: 0.3
+  max_tokens: 4096
+
+asr:
+  provider: faster-whisper
+  model: small
+  device: cpu
+  compute_type: int8
+
+tts:
+  provider: mimi
+  voice: default
+  rate: 1.0
+  output_format: mp3
+
+web:
+  port: 8080
+
+audio:
+  bitrate: 128k
+  sample_rate: 44100
+  channels: 1
+  max_output_minutes: 60        # 单集输出上限，超出拆分为多集
