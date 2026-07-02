@@ -147,3 +147,26 @@ def get_pending_episodes() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_all_episodes() -> list[dict]:
+    """获取所有 episode，按更新时间倒序。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM episode ORDER BY updated_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_episode(video_id: str) -> bool:
+    """删除 episode 记录。返回 True 表示删除了至少一行。"""
+    conn = _get_conn()
+    cursor = conn.execute(
+        "DELETE FROM episode WHERE video_id = ?",
+        (video_id,),
+    )
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
