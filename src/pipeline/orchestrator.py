@@ -12,7 +12,7 @@ from src.pipeline.state import TaskStatus, check_stage_file
 from src.youtube.extractor import extract as youtube_extract, check_connectivity
 from src.transcription.cleaner import clean as clean_text
 from src.transcription.transcriber import transcribe as whisper_transcribe
-from src.translation.client import translate as llm_translate, summarize as llm_summarize, _extract_terms
+from src.translation.client import translate as llm_translate, summarize as llm_summarize, _extract_terms, _quality_check
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize
 from src.audio.merger import merge
@@ -368,6 +368,19 @@ def _process_impl(
                 _extract_terms(str(script_path))
             except Exception as e:
                 logger.warning("术语提取失败（非致命）: %s", e)
+
+            # 翻译质量自检（非阻塞）
+            try:
+                transcript_clean_path = episode.get("transcript_clean_path", "")
+                if transcript_clean_path:
+                    source_text = Path(transcript_clean_path).read_text(encoding="utf-8")
+                    verdict = _quality_check(source_text, script_zh, metadata, llm_config=llm_config)
+                    if verdict:
+                        logger.info(
+                            "质量检查结果: %d/%d 项通过", verdict["passed"], verdict["total"]
+                        )
+            except Exception as e:
+                logger.warning("质量检查失败（非致命）: %s", e)
 
             progress("生成摘要...")
             try:

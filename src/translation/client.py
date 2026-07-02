@@ -489,6 +489,109 @@ def _extract_terms(script_zh_path: str) -> None:
             logger.info("Glossary (auto): '%s' -> '%s' (%d occurrences)", term, term_zh, count)
 
 
+def _quality_check(
+    source_text: str,
+    translated_text: str,
+    metadata: Optional[dict] = None,
+    llm_config: Optional[dict] = None,
+) -> Optional[dict]:
+    """翻译后质量自检：对比原文与译文中的关键信息点保留情况。
+
+    非阻塞：任何失败都只记录 warning，永不抛出异常。
+
+    Args:
+        source_text: 原始英文清洗文本
+        translated_text: 翻译后的中文文本
+        metadata: 视频元数据 dict（title, channel 等）
+        llm_config: 动态 LLM 配置，为 None 时使用 config.yaml 默认值
+
+    Returns:
+        {"passed": int, "total": int, "points": [...]} 或 None（检查失败时）
+    """
+    try:
+        client, model_name, api_key = _resolve_llm(llm_config)
+
+        if not api_key or api_key == "placeholder":
+            logger.warning("Quality check skipped: no LLM API key configured")
+            return None
+
+        # 截断文本以控制 token 用量（质量检查只需采样）
+        source_sample = source_text[:6000]
+        translated_sample = translated_text[:6000]
+
+        prompt = (
+            "列出原文中的 5-10 个关键信息点（人名、数字、观点、案例），"
+            "逐条检查译文中是否保留。以 JSON 对象格式输出：\n"
+            '{"points": [{"point": "信息点描述", "present": true, "note": "备注"}]}'
+            f"\n\n原文:\n{source_sample}\n\n译文:\n{translated_sample}"
+        )
+
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "你是一个专业的中文翻译质量审核员。请只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=512,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content or "{}"
+        raw = raw.strip()
+
+        # 解析 JSON 响应
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Quality check: unparseable JSON response: %s", raw[:200])
+            return None
+
+        # 提取 points 列表
+        if isinstance(data, list):
+            points = data
+        elif isinstance(data, dict):
+            points = data.get("points", [])
+            if not points:
+                # 尝试其他常见键名或 dict 值中的列表
+                for v in data.values():
+                    if isinstance(v, list):
+                        points = v
+                        break
+        else:
+            points = []
+
+        if not points:
+            logger.warning("Quality check: no points found in response")
+            return None
+
+        passed = sum(1 for p in points if p.get("present", False))
+        total = len(points)
+
+        if total == 0:
+            return None
+
+        if passed < total:
+            for p in points:
+                if not p.get("present", False):
+                    point_text = p.get("point", "?")
+                    note = p.get("note", "")
+                    logger.warning(
+                        "⚠ 质量告警: 缺少关键信息 '%s'%s",
+                        point_text,
+                        f" — {note}" if note else "",
+                    )
+            logger.warning("⚠ 质量告警: %d/%d 项通过", passed, total)
+        else:
+            logger.info("质量检查通过 (%d/%d)", passed, total)
+
+        return {"passed": passed, "total": total, "points": points}
+
+    except Exception as e:
+        logger.warning("Quality check failed (non-fatal): %s", e)
+        return None
+
+
 def _find_chinese_context(text: str, term_en: str) -> str:
     """在文本中查找英文术语附近的汉语上下文，作为翻译候选。"""
     idx = text.find(term_en)
