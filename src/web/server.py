@@ -732,6 +732,70 @@ async def api_delete_task(video_id: str):
     return {"video_id": video_id, "deleted": True}
 
 
+@app.post("/api/tts-preview")
+async def api_tts_preview(request: Request):
+    """合成一句测试短语并返回 WAV 音频，用于 TTS 音色试听。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求体须为 JSON"}, status_code=400)
+
+    provider = (body.get("provider") or "edge").strip()
+    voice = (body.get("voice") or "zh-CN-XiaoxiaoNeural").strip()
+    api_key = (body.get("api_key") or "").strip()
+    base_url = (body.get("base_url") or "").strip()
+    model = (body.get("model") or "").strip()
+
+    if provider not in ("edge", "mimi"):
+        return JSONResponse({"error": f"不支持的 TTS provider: {provider}"}, status_code=400)
+
+    # 构建 TTS 配置
+    if provider == "mimi" and api_key:
+        tts_config = {
+            "provider": "mimi",
+            "api_key": api_key,
+            "base_url": base_url or "https://api.xiaomimimo.com/v1",
+            "model": model or "mimo-v2.5-tts",
+            "voice": voice or "苏打",
+        }
+    else:
+        tts_config = {"provider": "edge", "voice": voice or "zh-CN-XiaoxiaoNeural"}
+
+    test_phrase = "你好，这是音色试听。"
+
+    try:
+        import tempfile
+        from src.tts.synthesizer import synthesize
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="tts_preview_"))
+        segments = synthesize(test_phrase, tmp_dir, tts_config=tts_config)
+
+        if not segments or not segments[0].exists():
+            return JSONResponse({"error": "TTS 合成失败，未生成音频"}, status_code=502)
+
+        wav_path = segments[0]
+
+        # 后台清理临时目录
+        def _cleanup():
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+
+        import threading
+        threading.Thread(target=_cleanup, daemon=True).start()
+
+        return FileResponse(
+            path=wav_path,
+            media_type="audio/wav",
+            filename="tts_preview.wav",
+        )
+    except Exception as e:
+        logger.warning("TTS preview failed: %s", e)
+        return JSONResponse({"error": f"TTS 试听失败: {e}"}, status_code=502)
+
+
 @app.get("/api/download/{video_id}")
 async def api_download(video_id: str):
     """下载生成的 MP3 文件。"""
