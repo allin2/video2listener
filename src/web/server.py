@@ -1,5 +1,7 @@
 """Web 服务。FastAPI + 静态 UI，接受 YouTube 链接并返回 MP3。"""
 
+import asyncio
+import json
 import logging
 import threading
 import time
@@ -7,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from src.config import get_config
 from src.storage import db
@@ -34,6 +36,35 @@ MIMO_PRESET_VOICES = [
     {"id": "Dean", "name": "Dean · English male"},
 ]
 
+# ── SSE 阶段定义 ────────────────────────────────────────────────────────
+# 7 个用户可见阶段（与内部 TaskStatus 解耦）
+SSE_STAGES = [
+    {"stage_id": 1, "name": "下载", "icon": "📥"},
+    {"stage_id": 2, "name": "转写", "icon": "🎙️"},
+    {"stage_id": 3, "name": "清洗", "icon": "🧹"},
+    {"stage_id": 4, "name": "翻译", "icon": "🌐"},
+    {"stage_id": 5, "name": "TTS", "icon": "🔊"},
+    {"stage_id": 6, "name": "合并", "icon": "🎵"},
+]
+
+# 从进度消息检测阶段切换：(消息子串, stage_id, 是否为完成标记)
+STAGE_TRIGGERS = [
+    ("获取视频信息", 1, False),
+    ("视频:", 1, True),  # stage 1 done with meta
+    ("开始语音转写", 2, False),
+    ("加载已有字幕", 2, False),
+    ("重新获取字幕", 2, False),
+    ("转写完成", 2, True),
+    ("清洗文本", 3, False),
+    ("文本清洗完成", 3, True),
+    ("开始翻译", 4, False),
+    ("翻译完成", 4, True),
+    ("TTS 文本清洗", 5, False),
+    ("开始语音合成", 5, False),
+    ("合并", 6, False),
+    ("MP3 已生成", 6, True),
+]
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # ── 内存任务状态（线程安全） ──────────────────────────────────────────
@@ -41,10 +72,16 @@ _task_states: dict[str, dict] = {}
 _task_lock = threading.Lock()
 
 
+_SSE_INTERNAL_KEYS = {"sse_queue", "sse_loop", "completed_stages", "stage_started_at", "stage_meta"}
+
+
 def _get_task_state(video_id: str) -> Optional[dict]:
+    """返回不含 SSE 内部字段的任务状态副本。"""
     with _task_lock:
         entry = _task_states.get(video_id)
-        return dict(entry) if entry else None
+        if entry is None:
+            return None
+        return {k: v for k, v in entry.items() if k not in _SSE_INTERNAL_KEYS}
 
 
 def _set_task_state(video_id: str, **kwargs):
@@ -62,6 +99,13 @@ def _set_task_state(video_id: str, **kwargs):
                 "error_message": None,
                 "started_at": time.time(),
                 "completed_at": None,
+                # SSE fields
+                "sse_queue": asyncio.Queue(),
+                "sse_loop": None,  # set by SSE endpoint
+                "current_stage_id": 0,
+                "completed_stages": set(),
+                "stage_started_at": {},
+                "stage_meta": {},
             }
             _task_states[video_id] = entry
         entry.update(kwargs)
@@ -70,15 +114,179 @@ def _set_task_state(video_id: str, **kwargs):
             pass  # keep existing
 
 
-def _append_progress(video_id: str, msg: str):
+def _emit_sse_event(video_id: str, event_type: str, data: dict):
+    """将结构化事件推入任务的 SSE 队列（线程安全）。"""
     with _task_lock:
         entry = _task_states.get(video_id)
-        if entry:
-            msgs = entry.setdefault("progress_messages", [])
-            msgs.append(msg)
-            if len(msgs) > 20:
-                entry["progress_messages"] = msgs[-20:]
-            entry["current_stage"] = msg
+        if entry is None:
+            return
+        queue = entry.get("sse_queue")
+        loop = entry.get("sse_loop")
+    if queue is None or loop is None:
+        return
+    payload = {"event": event_type, "data": data}
+    try:
+        loop.call_soon_threadsafe(queue.put_nowait, payload)
+    except asyncio.QueueFull:
+        logger.warning("SSE queue full for %s", video_id)
+
+
+def _detect_stage(msg: str, entry: dict) -> list[dict]:
+    """检测进度消息中的阶段切换，返回需要发射的 SSE 事件列表。"""
+    events = []
+    now = time.time()
+
+    for fragment, stage_id, is_done in STAGE_TRIGGERS:
+        if fragment not in msg:
+            continue
+
+        current_sid = entry.get("current_stage_id", 0)
+        completed = entry.get("completed_stages", set())
+        timers = entry.setdefault("stage_started_at", {})
+        meta = entry.setdefault("stage_meta", {})
+
+        # 提取阶段 1 元数据（视频标题 + 时长）
+        stage_meta = None
+        if stage_id == 1 and "视频:" in msg:
+            parts = msg.replace("视频: ", "", 1).strip()
+            meta[1] = parts
+            stage_meta = parts
+
+        if is_done:
+            # 阶段完成
+            if stage_id not in completed:
+                completed.add(stage_id)
+                entry["current_stage_id"] = max(stage_id, current_sid)
+                duration_s = int(now - timers.get(stage_id, now)) if stage_id in timers else None
+                stage_def = SSE_STAGES[stage_id - 1]
+                ev = {
+                    "type": "stage_change",
+                    "stage_id": stage_id, "name": stage_def["name"], "icon": stage_def["icon"],
+                    "status": "done",
+                    **({"duration_s": duration_s} if duration_s is not None else {}),
+                }
+                if stage_meta:
+                    ev["meta"] = stage_meta
+                elif stage_id in meta:
+                    ev["meta"] = meta[stage_id]
+                events.append(ev)
+        elif stage_id > current_sid or (stage_id == current_sid and stage_id not in completed):
+            # 新阶段激活（或重新激活）
+            # 隐式标记之前所有未完成的阶段为 done
+            for sid in range(1, stage_id):
+                if sid not in completed:
+                    completed.add(sid)
+                    ds = int(now - timers.get(sid, now)) if sid in timers else None
+                    sd = SSE_STAGES[sid - 1]
+                    ev = {
+                        "type": "stage_change",
+                        "stage_id": sid, "name": sd["name"], "icon": sd["icon"],
+                        "status": "done",
+                        **({"duration_s": ds} if ds is not None else {}),
+                    }
+                    if sid in meta:
+                        ev["meta"] = meta[sid]
+                    events.append(ev)
+
+            # 激活新阶段
+            if stage_id not in completed:
+                timers[stage_id] = now
+                entry["current_stage_id"] = stage_id
+                stage_def = SSE_STAGES[stage_id - 1]
+                events.append({
+                    "type": "stage_change",
+                    "stage_id": stage_id, "name": stage_def["name"], "icon": stage_def["icon"],
+                    "status": "active",
+                })
+
+        # 阶段子进度（仍在同一阶段内）
+        elif stage_id == current_sid and not is_done:
+            pct = _extract_progress_pct(msg)
+            ev = {
+                "type": "stage_progress",
+                "stage_id": stage_id, "message": msg,
+            }
+            if pct is not None:
+                ev["pct"] = pct
+            events.append(ev)
+
+        break  # 只匹配第一个触发词
+
+    return events
+
+
+def _extract_progress_pct(msg: str) -> Optional[int]:
+    """从进度消息中提取百分比（如果有）。"""
+    import re
+    m = re.search(r'(\d+)/(\d+)', msg)
+    if m:
+        return int(float(m.group(1)) / float(m.group(2)) * 100)
+    m = re.search(r'(\d+)%', msg)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _derive_stages(entry: dict) -> list[dict]:
+    """从任务状态推导 stages 数组（用于轮询降级）。"""
+    stages = []
+    completed = entry.get("completed_stages", set())
+    current_sid = entry.get("current_stage_id", 0)
+    timers = entry.get("stage_started_at", {})
+    meta = entry.get("stage_meta", {})
+    status = entry.get("status", "queued")
+    now = time.time()
+
+    for sd in SSE_STAGES:
+        sid = sd["stage_id"]
+        stage = {"stage_id": sid, "name": sd["name"], "icon": sd["icon"], "status": "pending"}
+
+        if sid in completed:
+            stage["status"] = "done"
+            if sid in timers:
+                stage["duration_s"] = int(now - timers[sid])
+            if sid in meta:
+                stage["meta"] = meta[sid]
+        elif sid == current_sid and status in ("processing", "queued"):
+            stage["status"] = "active"
+            if sid in timers:
+                stage["duration_s"] = int(now - timers[sid])
+        elif status == "failed" and sid == current_sid:
+            stage["status"] = "failed"
+        elif status == "cancelled" and sid >= current_sid:
+            stage["status"] = "cancelled"
+
+        stages.append(stage)
+
+    return stages
+
+
+def _append_progress(video_id: str, msg: str):
+    """存储进度消息并检测阶段切换，发射 SSE 事件。"""
+    events_to_emit = []
+
+    with _task_lock:
+        entry = _task_states.get(video_id)
+        if entry is None:
+            return
+
+        msgs = entry.setdefault("progress_messages", [])
+        msgs.append(msg)
+        if len(msgs) > 20:
+            entry["progress_messages"] = msgs[-20:]
+        entry["current_stage"] = msg
+
+        # 阶段检测（在锁内，保证对 entry 可变字段的修改是原子的）
+        events_to_emit = _detect_stage(msg, entry)
+
+    # 在锁外发射 SSE 事件（避免长时间持锁）
+    for ev in events_to_emit:
+        event_type = ev.pop("type")
+        _emit_sse_event(video_id, event_type, ev)
+
+    # 非阶段切换消息作为 log 事件
+    if not events_to_emit:
+        _emit_sse_event(video_id, "log", {"message": msg})
 
 
 # ── 页面 ──────────────────────────────────────────────────────────────
@@ -246,6 +454,14 @@ async def api_process(request: Request):
                 output_path=result["output_path"],
                 completed_at=time.time(),
             )
+            # 发射 pipeline_complete
+            episode = db.get_episode(video_id)
+            title = episode.get("title_original", video_id) if episode else video_id
+            _emit_sse_event(video_id, "pipeline_complete", {
+                "video_id": video_id,
+                "output_path": result["output_path"],
+                "title": title,
+            })
         else:
             error_msg = result.get("message", "未知错误")
             _set_task_state(
@@ -254,6 +470,14 @@ async def api_process(request: Request):
                 error_message=error_msg,
                 completed_at=time.time(),
             )
+            # 发射 pipeline_error
+            with _task_lock:
+                entry = _task_states.get(video_id)
+                failed_stage = entry.get("current_stage_id", 0) if entry else 0
+            _emit_sse_event(video_id, "pipeline_error", {
+                "stage_id": failed_stage,
+                "message": error_msg,
+            })
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -266,12 +490,71 @@ async def api_process(request: Request):
     }
 
 
+@app.get("/api/status/{video_id}/stream")
+async def api_status_stream(video_id: str, request: Request):
+    """SSE 实时进度流。在管道处理期间推送 stage_change / stage_progress / log / pipeline_complete / pipeline_error 事件。"""
+    queue = None
+    with _task_lock:
+        entry = _task_states.get(video_id)
+        if entry is None:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        queue = entry.get("sse_queue")
+        entry["sse_loop"] = asyncio.get_running_loop()
+
+    if queue is None:
+        return JSONResponse({"error": "SSE 不可用"}, status_code=500)
+
+    async def event_generator():
+        try:
+            while True:
+                # 检查客户端是否断开
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # 发送心跳保持连接
+                    yield ": heartbeat\n\n"
+                    continue
+
+                event_type = payload.get("event", "log")
+                data = payload.get("data", {})
+
+                # 格式化 SSE 输出
+                out = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                yield out
+
+                # 终态事件后关闭流
+                if event_type in ("pipeline_complete", "pipeline_error"):
+                    break
+        except asyncio.CancelledError:
+            pass  # 客户端断开
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/status/{video_id}")
 async def api_status(video_id: str):
-    """查询任务状态和处理进度。"""
+    """查询任务状态和处理进度（含 stages 数组用于轮询降级）。"""
     # 先从内存查
     state = _get_task_state(video_id)
     if state:
+        # 注入 stages 数组（轮询降级用）
+        with _task_lock:
+            entry = _task_states.get(video_id)
+            if entry:
+                state["stages"] = _derive_stages(entry)
+            else:
+                state["stages"] = []
         return state
 
     # 兜底：从数据库恢复（服务重启后）
@@ -299,6 +582,7 @@ async def api_status(video_id: str):
             "error_message": episode.get("error_message"),
             "started_at": None,
             "completed_at": None,
+            "stages": [],
         }
 
     return JSONResponse({"error": "任务不存在"}, status_code=404)

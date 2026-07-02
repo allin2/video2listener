@@ -236,32 +236,38 @@ def _process_impl(
             captions_path_value = episode.get("captions_path") if episode else None
             captions_file = Path(captions_path_value) if captions_path_value else None
             if captions_file and captions_file.is_file():
+                progress("开始语音转写...")
                 progress("加载已有字幕...")
                 captions = json.loads(captions_file.read_text(encoding="utf-8"))
                 raw_text = "\n".join(c.get("text", "") for c in captions)
+                progress("转写完成")
             else:
                 if captions_file:
                     logger.warning("Stored captions file is missing, falling back: %s", captions_file)
                 # 检查是否有音频文件需要转写
                 audio_files = list(data_dir.glob("*.wav")) + list(data_dir.glob("*.m4a"))
                 if audio_files:
-                    progress("无字幕，开始语音转写...")
+                    progress("开始语音转写...")
                     captions = whisper_transcribe(audio_files[0], data_dir)
                     raw_text = "\n".join(c.get("text", "") for c in captions)
                     captions_path = str(data_dir / "captions_en.json")
                     db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
+                    progress("转写完成")
                 else:
                     # 尝试重新提取
+                    progress("开始语音转写...")
                     progress("重新获取字幕...")
                     result = youtube_extract(video_id, data_dir)
                     if result.subtitles:
                         raw_text = "\n".join(s.text for s in result.subtitles)
+                        progress("转写完成")
                     elif result.audio_path:
                         progress("无字幕，开始语音转写...")
                         captions = whisper_transcribe(result.audio_path, data_dir)
                         raw_text = "\n".join(c.get("text", "") for c in captions)
                         captions_path = str(data_dir / "captions_en.json")
                         db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
+                        progress("转写完成")
                     else:
                         raise RuntimeError("无法获取字幕或音频")
 
