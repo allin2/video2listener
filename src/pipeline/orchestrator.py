@@ -331,7 +331,7 @@ def _process_impl(
                         raise RuntimeError("无法获取字幕或音频")
 
             progress("清洗文本...")
-            cleaned = clean_text(raw_text)
+            cleaned, speaker_count = clean_text(raw_text)
             clean_path = data_dir / "transcript_clean.txt"
             clean_path.write_text(cleaned, encoding="utf-8")
             db.update_status(
