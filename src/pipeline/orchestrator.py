@@ -76,6 +76,7 @@ def process(
     llm_config: Optional[dict] = None,
     tts_config: Optional[dict] = None,
     cancel_event=None,
+    resume_from: Optional[str] = None,
 ) -> dict:
     """执行完整的处理管道。
 
@@ -84,9 +85,10 @@ def process(
         mode: 输出模式 (faithful | podcast | condensed)
         force: 是否强制重新处理
         on_progress: 进度回调 (message: str)
-        llm_config: 动态 LLM 配置 {"api_key": "...", "base_url": "...", "model": "..."}
-        tts_config: 动态 TTS 配置 {"provider": "edge"|"openai", "voice": "...", "api_key": "..."}
+        llm_config: 动态 LLM 配置
+        tts_config: 动态 TTS 配置
         cancel_event: threading.Event 取消信号
+        resume_from: 从指定阶段恢复 (text_ready | translated | tts_done)
 
     Returns:
         {"status": "done"|"failed"|"cancelled", "video_id": str, "output_path": str|None, "message": str}
@@ -98,7 +100,7 @@ def process(
         _active_tasks.add(video_id)
 
     try:
-        return _process_impl(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event)
+        return _process_impl(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event, resume_from)
     finally:
         with _lock:
             _active_tasks.discard(video_id)
@@ -133,9 +135,18 @@ def _process_impl(
     llm_config: Optional[dict] = None,
     tts_config: Optional[dict] = None,
     cancel_event=None,
+    resume_from: Optional[str] = None,
 ) -> dict:
     cfg = get_config()
     root = cfg["_project_root"]
+
+    # resume_from 映射到 TaskStatus
+    _RESUME_MAP = {
+        "metadata_fetched": TaskStatus.METADATA_FETCHED,
+        "text_ready": TaskStatus.TEXT_READY,
+        "translated": TaskStatus.TRANSLATED,
+        "tts_done": TaskStatus.TTS_DONE,
+    }
 
     def progress(msg: str):
         logger.info("[%s] %s", video_id, msg)
@@ -228,10 +239,18 @@ def _process_impl(
     else:
         # 从文件系统推断当前状态
         current_status = TaskStatus.NEW
-        for status in reversed([s for s in TaskStatus if s not in (TaskStatus.NEW, TaskStatus.FAILED, TaskStatus.DONE)]):
+        for status in reversed([s for s in TaskStatus if s not in (TaskStatus.NEW, TaskStatus.FAILED, TaskStatus.DONE, TaskStatus.CANCELLED)]):
             if check_stage_file(data_dir, status):
                 current_status = status
                 break
+
+        # resume_from 覆盖检测到的状态（从失败阶段恢复）
+        if resume_from and resume_from in _RESUME_MAP:
+            resume_status = _RESUME_MAP[resume_from]
+            progress(f"从阶段恢复: {resume_from} ({resume_status.value})")
+            current_status = resume_status
+            # 清除失败的 DB 记录
+            db.update_status(video_id, resume_status.value, error_message=None)
 
     try:
         # --- Cancel check before metadata ---

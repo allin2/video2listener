@@ -370,6 +370,7 @@ async def api_process(request: Request):
     tts_model = (body.get("tts_model", "") or "mimo-v2.5-tts").strip()
     tts_voice = (body.get("tts_voice", "") or "苏打").strip()
     force = bool(body.get("force", False))
+    resume_from = (body.get("resume_from", "") or "").strip()
 
     if not url:
         return JSONResponse({"error": "请输入 YouTube 链接"}, status_code=400)
@@ -456,6 +457,7 @@ async def api_process(request: Request):
             video_id, mode, force=force, on_progress=progress,
             llm_config=llm_config, tts_config=tts_config,
             cancel_event=cancel_event,
+            resume_from=resume_from or None,
         )
 
         if result["status"] == "done" and result["output_path"]:
