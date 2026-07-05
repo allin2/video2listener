@@ -37,18 +37,42 @@ def next_status(current: TaskStatus) -> Optional[TaskStatus]:
 
 
 def check_stage_file(data_dir: Path, status: TaskStatus) -> bool:
-    """检查对应阶段的中间文件是否存在且非空。"""
-    if status == TaskStatus.TTS_DONE:
-        # tts_segments 目录有文件才说明 TTS 已完成
-        segs_dir = data_dir / "tts_segments"
-        return segs_dir.is_dir() and any(segs_dir.iterdir())
-    if status == TaskStatus.DONE:
-        return any(path.stat().st_size > 0 for path in data_dir.glob("*.mp3"))
+    """兼容旧调用：在同一目录检查共享或变体阶段文件。"""
+    if status in (TaskStatus.METADATA_FETCHED, TaskStatus.TEXT_READY):
+        return check_shared_stage_file(data_dir, status)
+    return check_variant_stage_file(data_dir, status)
 
+
+def check_shared_stage_file(data_dir: Path, status: TaskStatus) -> bool:
+    """检查与模式无关的下载、转写和清洗阶段文件。"""
     checks = {
         TaskStatus.METADATA_FETCHED: data_dir / "metadata.json",
         TaskStatus.TEXT_READY: data_dir / "transcript_clean.txt",
-        TaskStatus.TRANSLATED: data_dir / "script_zh.txt",
+    }
+    path = checks.get(status)
+    return bool(path and path.is_file() and path.stat().st_size > 0)
+
+
+def check_variant_stage_file(variant_dir: Path, status: TaskStatus) -> bool:
+    """只在目标模式目录检查翻译、TTS 和最终输出。"""
+    if status == TaskStatus.TTS_DONE:
+        # 单个分段只能说明 TTS 已开始；必须已有合并后的 MP3 才算完成。
+        segs_dir = variant_dir / "tts_segments"
+        has_segment = segs_dir.is_dir() and any(
+            path.is_file() and path.stat().st_size > 0 for path in segs_dir.iterdir()
+        )
+        outputs = [path for path in variant_dir.glob("*.mp3") if path.stat().st_size > 0]
+        has_output = bool(outputs)
+        script_path = variant_dir / "script_zh.txt"
+        if has_output and script_path.is_file():
+            # 新译文生成后，旧 MP3/分段不能再被误认为当前任务的完成结果。
+            has_output = max(path.stat().st_mtime for path in outputs) >= script_path.stat().st_mtime
+        return has_segment and has_output
+    if status == TaskStatus.DONE:
+        return any(path.stat().st_size > 0 for path in variant_dir.glob("*.mp3"))
+
+    checks = {
+        TaskStatus.TRANSLATED: variant_dir / "script_zh.txt",
     }
     path = checks.get(status)
     if path is None:

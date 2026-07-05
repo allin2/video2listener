@@ -102,6 +102,7 @@
   .stage-dot.pending { background: #d1d5db; border: 2px solid #d1d5db; }
   .stage-dot.active { background: #4f46e5; box-shadow: 0 0 0 4px rgba(79,70,229,.25); animation: stagePulse 1.5s ease-in-out infinite; }
   .stage-dot.done { background: #16a34a; }
+  .stage-dot.reused { background: #16a34a; box-shadow: 0 0 0 5px #dcfce7; }
   .stage-dot.failed { background: #dc2626; }
   .stage-dot.cancelled { background: #9ca3af; }
   @keyframes stagePulse {
@@ -112,10 +113,12 @@
     position: absolute; left: 6px; top: 20px; width: 2px; height: calc(100% - 8px); background: #e5e7eb; z-index: 0;
   }
   .stage-line.done { background: #16a34a; }
+  .stage-line.reused { background: #16a34a; }
   .stage-info { flex: 1; min-width: 0; }
   .stage-name { font-size: 0.88rem; font-weight: 600; color: #6b7280; margin-bottom: 1px; transition: color 0.3s; }
   .stage-name.active { color: #4f46e5; }
   .stage-name.done { color: #1a1a1a; }
+  .stage-name.reused { color: #166534; }
   .stage-name.failed { color: #dc2626; }
   .stage-meta { font-size: 0.75rem; color: #9ca3af; }
   .stage-meta .duration { color: #6b7280; }
@@ -221,6 +224,10 @@
   .task-row.confirming .task-row-actions { display: none; }
   .task-row-fade { opacity: 0; transform: translateX(20px); transition: all 0.3s; }
   .history-footer { padding: 0.6rem 1.2rem; border-top: 1px solid #eee; font-size: 0.78rem; color: #999; flex-shrink: 0; }
+  .quality-notice { margin:.75rem 0; padding:.7rem .85rem; border-radius:.7rem; font-size:.86rem; font-weight:650; }
+  .quality-notice.passed { background:#dcfce7; color:#166534; }
+  .quality-notice.degraded { background:#fef3c7; color:#92400e; }
+  .quality-chip { display:inline-block; margin-left:.35rem; padding:.12rem .42rem; border-radius:999px; background:#fef3c7; color:#92400e; font-size:.68rem; font-weight:700; }
 
   /* ── Key Field UX ──────────────────────────────────────────────────── */
   .key-input-wrap { position: relative; display: flex; align-items: center; }
@@ -388,10 +395,12 @@
     <span class="status-badge" id="statusBadge">排队中</span>
     <p class="meta" id="metaInfo"></p>
     <div class="pipeline-timeline" id="pipelineTimeline"></div>
+    <button class="btn btn-secondary" id="progressBackBtn" style="margin-top: 1rem;">← 返回初始页面</button>
   </div>
   <div class="card hidden" id="resultCard">
     <h2>✅ 处理完成</h2>
     <p style="color: #555; margin-bottom: 0.5rem;">音频已生成，点击下方按钮下载：</p>
+    <div class="quality-notice hidden" id="qualityNotice"></div>
     <div class="result-actions">
       <button class="btn btn-download" id="downloadBtn">⬇️ 下载 MP3</button>
       <button class="btn btn-secondary" id="newTaskBtn">← 处理新视频</button>
@@ -407,7 +416,7 @@
   <!-- 重复视频弹窗 -->
   <div class="modal-overlay" id="duplicateModal">
     <div class="modal-box">
-      <h3>📼 视频已处理过</h3>
+      <h3 id="duplicateTitle">📼 视频已处理过</h3>
       <p id="duplicateMsg">该视频之前已处理过，是否重新生成？</p>
       <div class="modal-actions">
         <button class="btn modal-download" id="modalDownloadBtn">⬇️ 下载已有文件</button>
@@ -433,7 +442,7 @@
 
 <script>
 (function () {
-  let pollTimer = null, elapsedTimer = null, videoId = null, startedAt = null, pollFailures = 0;
+  let pollTimer = null, elapsedTimer = null, videoId = null, currentMode = null, startedAt = null, pollFailures = 0;
   let sseSource = null, timeline = null;
 
   const $ = id => document.getElementById(id);
@@ -444,7 +453,8 @@
   const statusBadge = $('statusBadge'), metaInfo = $('metaInfo');
   const pipelineTimeline = $('pipelineTimeline'), progressTitle = $('progressTitle');
   const downloadBtn = $('downloadBtn'), errorMsg = $('errorMsg'), retryBtn = $('retryBtn');
-  const elapsedFinal = $('elapsedFinal'), newTaskBtn = $('newTaskBtn');
+  const elapsedFinal = $('elapsedFinal'), newTaskBtn = $('newTaskBtn'), progressBackBtn = $('progressBackBtn');
+  const qualityNotice = $('qualityNotice');
   const rememberConfig = $('rememberConfig'), clearConfigBtn = $('clearConfigBtn');
   const CONFIG_STORAGE_KEY = 'v2l_savedConfig_v1';
 
@@ -515,15 +525,9 @@
     setTimeout(() => { clearConfigBtn.textContent = '清除保存'; }, 1200);
   });
 
-  // 恢复 session
+  // 等所有类和函数初始化后再恢复 session，避免刷新时提前访问 PipelineTimeline。
   const savedVideoId = sessionStorage.getItem('v2l_videoId');
-  if (savedVideoId) {
-    videoId = savedVideoId;
-    startedAt = parseFloat(sessionStorage.getItem('v2l_startedAt') || '0');
-    formCard.classList.add('hidden'); progressCard.classList.remove('hidden');
-    timeline = new PipelineTimeline(pipelineTimeline);
-    startSSE(videoId);
-  }
+  const savedMode = sessionStorage.getItem('v2l_mode');
 
   function formatElapsed(sec) {
     if (sec < 60) return `${Math.floor(sec)} 秒`;
@@ -611,7 +615,7 @@
       if (!st) return;
       st.status = status;
       const els = [st.dotEl, st.nameEl, st.lineEl];
-      els.forEach(el => { el.classList.remove('pending','active','done','failed','cancelled'); el.classList.add(status); });
+      els.forEach(el => { el.classList.remove('pending','active','done','reused','failed','cancelled'); el.classList.add(status); });
     }
 
     setStageActive(id) {
@@ -638,6 +642,13 @@
       if (durationS != null) parts.push(formatElapsed(durationS));
       if (meta) parts.push(meta);
       st.metaEl.innerHTML = parts.length ? parts.join(' · ') : '✓';
+      this._clearActions(id);
+    }
+
+    setStageReused(id) {
+      this._setStatus(id, 'reused');
+      const st = this.stages.get(id);
+      st.metaEl.textContent = '复用缓存';
       this._clearActions(id);
     }
 
@@ -710,18 +721,39 @@
       if (st) st.actionsEl.innerHTML = '';
     }
 
+    clearAllActions() {
+      this.stages.forEach(st => { st.actionsEl.innerHTML = ''; });
+    }
+
     updateFromPoll(stagesArray) {
       if (!stagesArray) return;
       stagesArray.forEach(s => {
+        const st = this.stages.get(s.stage_id);
+        if (!st) return;
         switch (s.status) {
-          case 'active': this._setStatus(s.stage_id, 'active'); this.currentStageId = s.stage_id; break;
-          case 'done': this._setStatus(s.stage_id, 'done'); break;
-          case 'failed': this._setStatus(s.stage_id, 'failed'); break;
-          case 'cancelled': this._setStatus(s.stage_id, 'cancelled'); break;
-        }
-        if (s.meta) this.stages.get(s.stage_id).metaEl.textContent = s.meta;
-        if (s.duration_s) {
-          this.stages.get(s.stage_id).metaEl.innerHTML = formatElapsed(s.duration_s);
+          case 'active':
+            if (st.status !== 'active') this.setStageActive(s.stage_id);
+            this.currentStageId = s.stage_id;
+            {
+              const parts = [];
+              if (s.meta) parts.push(s.meta);
+              if (s.duration_s != null) parts.push(formatElapsed(s.duration_s));
+              if (parts.length) st.metaEl.textContent = parts.join(' · ');
+            }
+            break;
+          case 'done':
+            this.setStageDone(s.stage_id, s.duration_s, s.meta);
+            break;
+          case 'reused':
+            this.setStageReused(s.stage_id);
+            break;
+          case 'failed':
+            if (st.status !== 'failed') this.setStageFailed(s.stage_id, s.message);
+            break;
+          case 'cancelled':
+            this._setStatus(s.stage_id, 'cancelled');
+            this._clearActions(s.stage_id);
+            break;
         }
       });
     }
@@ -733,7 +765,7 @@
   }
 
   // ── SSE client ──────────────────────────────────────────────────────
-  function startSSE(vid) {
+  function startSSE(vid, mode) {
     if (sseSource) { sseSource.close(); sseSource = null; }
     if (typeof EventSource === 'undefined') {
       // 浏览器不支持 SSE → 降级到轮询
@@ -741,18 +773,31 @@
       return;
     }
     try {
-      sseSource = new EventSource('/api/status/' + vid + '/stream');
+      sseSource = new EventSource('/api/status/' + vid + '/' + mode + '/stream');
+
+      sseSource.addEventListener('state_snapshot', (e) => {
+        const state = JSON.parse(e.data);
+        if (state.stages && timeline) timeline.updateFromPoll(state.stages);
+        updateUI(state);
+      });
 
       sseSource.addEventListener('stage_change', (e) => {
         const d = JSON.parse(e.data);
         if (d.status === 'active') timeline.setStageActive(d.stage_id);
         else if (d.status === 'done') timeline.setStageDone(d.stage_id, d.duration_s, d.meta);
+        else if (d.status === 'reused') timeline.setStageReused(d.stage_id);
         else if (d.status === 'failed') timeline.setStageFailed(d.stage_id, d.message);
       });
 
       sseSource.addEventListener('stage_progress', (e) => {
         const d = JSON.parse(e.data);
         timeline.setStageProgress(d.stage_id, d.message, d.pct);
+      });
+
+      sseSource.addEventListener('translation_phase', (e) => {
+        const d = JSON.parse(e.data);
+        const suffix = d.total ? ` (${d.current || 0}/${d.total})` : '';
+        timeline.setStageProgress(4, `${d.label || '翻译'}${suffix}`);
       });
 
       sseSource.addEventListener('log', (e) => {
@@ -764,7 +809,10 @@
         const d = JSON.parse(e.data);
         stopPolling(); sseSource.close(); sseSource = null;
         // 所有阶段标记完成
-        SSE_STAGES.forEach(s => timeline.setStageDone(s.id));
+        SSE_STAGES.forEach(s => {
+          if (timeline.stages.get(s.id)?.status !== 'reused') timeline.setStageDone(s.id);
+        });
+        timeline.clearAllActions();
         onPipelineDone(d);
       });
 
@@ -783,7 +831,7 @@
         statusBadge.textContent = '已取消'; statusBadge.className = 'status-badge status-failed';
         progressTitle.textContent = '⏹ 已取消';
         document.title = '[✗] video2listener';
-        sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+        sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
       });
 
       sseSource.onerror = () => {
@@ -798,7 +846,8 @@
   }
 
   function onPipelineDone(d) {
-    const doneState = { status: 'done', output_path: d.output_path, completed_at: Date.now() / 1000 };
+    const doneState = { status: 'done', output_path: d.output_path, completed_at: Date.now() / 1000,
+      audit_status: d.audit_status, audit_message: d.audit_message };
     if (d.title) document.title = '[✓] ' + d.title + ' · video2listener';
     else document.title = '[✓] video2listener';
     // 系统通知
@@ -828,7 +877,7 @@
     const btn = document.getElementById('cancelStageBtn');
     if (btn) { btn.disabled = true; btn.textContent = '取消中…'; }
     try {
-      await fetch('/api/cancel/' + videoId, { method: 'POST' });
+      await fetch('/api/cancel/' + videoId + '/' + currentMode, { method: 'POST' });
     } catch (_) {
       if (btn) { btn.disabled = false; btn.textContent = '⏹ 取消'; }
     }
@@ -836,11 +885,10 @@
 
   function retryFromStage(stageId) {
     // Map stage_id back to resume_from string
-    const resumeMap = { 3: 'text_ready', 4: 'translated', 5: 'tts_done' };
+    const resumeMap = { 3: 'metadata_fetched', 4: 'text_ready', 5: 'translated' };
     // Submit with force + resume_from (handled in U4)
-    const mode = document.querySelector('input[name="mode"]:checked')?.value || 'podcast';
     returnToForm(false);
-    setTimeout(() => submitTask(true), 100);
+    setTimeout(() => submitTask('regenerate_variant'), 100);
     // Store resume_from for next submit
     sessionStorage.setItem('v2l_resumeFrom', resumeMap[stageId] || '');
   }
@@ -987,16 +1035,31 @@
   });
 
   // ── 轮询（降级用） ─────────────────────────────────────────────────
+  function markConnectionInterrupted(message) {
+    pollFailures++;
+    progressTitle.textContent = '🔄 连接暂时中断，正在重试';
+    statusBadge.textContent = '重新连接中…';
+    statusBadge.className = 'status-badge status-queued';
+    if (timeline && pollFailures === 1) {
+      timeline.addLogEntry(timeline.currentStageId, message || '连接暂时中断，正在自动重试…');
+    }
+  }
+
   async function pollStatus() {
     try {
-      const resp = await fetch(`/api/status/${videoId}`);
-      if (!resp.ok) { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('连接中断'); } return; }
+      const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
+      if (resp.status === 404) { returnToForm(false); return; }
+      if (!resp.ok) { markConnectionInterrupted('服务暂时不可用，正在自动重试…'); return; }
+      const hadFailures = pollFailures > 0;
       pollFailures = 0;
       const state = await resp.json();
+      if (hadFailures && timeline) {
+        timeline.addLogEntry(timeline.currentStageId, '连接已恢复');
+      }
       // 用 stages 数组驱动时间线
       if (state.stages && timeline) timeline.updateFromPoll(state.stages);
       updateUI(state);
-    } catch { pollFailures++; if (pollFailures>=3) { stopPolling(); showError('网络异常'); } }
+    } catch { markConnectionInterrupted('网络暂时不可用，正在自动重试…'); }
   }
   function startPolling() {
     if (pollTimer) return;
@@ -1008,6 +1071,11 @@
   function updateElapsed() { if (!startedAt) return; metaInfo.textContent = `⏱️ 已用 ${formatElapsed((Date.now()/1000)-startedAt)}`; }
 
   function updateUI(state) {
+    if (state.translation_phase && timeline) {
+      const p = state.translation_phase;
+      const suffix = p.total ? ` (${p.current || 0}/${p.total})` : '';
+      timeline.setStageProgress(4, `${p.label || '翻译'}${suffix}`);
+    }
     statusBadge.textContent = state.status==='queued'?'排队中…':state.status==='processing'?'处理中…':state.status==='done'?'已完成':state.status==='failed'?'失败':state.status;
     statusBadge.className = 'status-badge status-'+state.status;
     progressTitle.textContent = state.status==='processing'?'⏳ 处理中':state.status==='done'?'✅ 完成':state.status==='failed'?'❌ 失败':'⏳ 处理中';
@@ -1016,10 +1084,21 @@
     if (state.status==='done') {
       stopPolling();
       if (sseSource) { sseSource.close(); sseSource = null; }
+      if (timeline) timeline.clearAllActions();
       resultCard.classList.remove('hidden');
+      qualityNotice.className = 'quality-notice hidden';
+      qualityNotice.textContent = '';
+      if (state.audit_status === 'degraded') {
+        qualityNotice.className = 'quality-notice degraded';
+        qualityNotice.textContent = '⚠️ ' + (state.audit_message || '质量审计降级：音频可下载，但语义审计未完整完成');
+      } else if (state.audit_status === 'passed') {
+        qualityNotice.className = 'quality-notice passed';
+        qualityNotice.textContent = '✅ 忠实翻译质量审计完全通过';
+      }
       if (startedAt) { const sec=(state.completed_at||Date.now()/1000)-startedAt; elapsedFinal.textContent=`总耗时: ${formatElapsed(sec)}`; }
-      downloadBtn.onclick=()=>{window.location.href=`/api/download/${videoId}`;};
-      sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+      downloadBtn.onclick=()=>{window.location.href=`/api/download/${videoId}/${currentMode}`;};
+      sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
+      if (!state.summary_path) startSummaryPolling();
     }
     if (state.status==='failed') {
       stopPolling();
@@ -1030,7 +1109,31 @@
   function showError(msg) {
     errorCard.classList.remove('hidden'); errorMsg.textContent=msg;
     document.title = '[✗] video2listener';
-    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
+  }
+
+  let summaryPollTimer = null;
+  let summaryPollStart = 0;
+  function startSummaryPolling() {
+    if (summaryPollTimer) return;
+    summaryPollStart = Date.now();
+    summaryPollTimer = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
+        if (!resp.ok) return;
+        const state = await resp.json();
+        if (state.summary_path) {
+          clearInterval(summaryPollTimer);
+          summaryPollTimer = null;
+          // 摘要已在后台生成，刷新历史面板即可展示
+          return;
+        }
+        if (Date.now() - summaryPollStart > 30000) {
+          clearInterval(summaryPollTimer);
+          summaryPollTimer = null;
+        }
+      } catch {}
+    }, 2000);
   }
 
   function returnToForm(clearUrl) {
@@ -1044,10 +1147,38 @@
     submitBtn.disabled=false; submitBtn.textContent='开始处理';
     errorMsg.textContent=''; elapsedFinal.textContent='';
     if (clearUrl) $('url').value='';
-    videoId=null; startedAt=null; pollFailures=0;
+    videoId=null; currentMode=null; startedAt=null; pollFailures=0;
     document.title = 'video2listener — YouTube 转中文 MP3 播客';
-    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_startedAt');
+    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
     $('url').focus();
+  }
+
+  async function restoreTaskSession(savedId, savedTaskMode) {
+    videoId = savedId;
+    currentMode = savedTaskMode || document.querySelector('input[name="mode"]:checked')?.value || 'podcast';
+    const taskModeInput = document.querySelector(`input[name="mode"][value="${currentMode}"]`);
+    if (taskModeInput) taskModeInput.checked = true;
+    startedAt = parseFloat(sessionStorage.getItem('v2l_startedAt') || '0');
+    formCard.classList.add('hidden');
+    resultCard.classList.add('hidden');
+    errorCard.classList.add('hidden');
+    progressCard.classList.remove('hidden');
+    timeline = new PipelineTimeline(pipelineTimeline);
+
+    try {
+      const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
+      if (!resp.ok) { returnToForm(false); return; }
+      const state = await resp.json();
+      if (state.stages) timeline.updateFromPoll(state.stages);
+      updateUI(state);
+      if (state.status === 'queued' || state.status === 'processing') {
+        startSSE(videoId, currentMode);
+        // SSE 不重放刷新前事件；轮询负责恢复当前状态并防止页面卡住。
+        startPolling();
+      }
+    } catch (_) {
+      returnToForm(false);
+    }
   }
 
   // ── 提交 ────────────────────────────────────────────────────────────
@@ -1111,40 +1242,10 @@
   submitForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!validateForm()) return;
-    const url = $('url').value.trim();
-    const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
-    saveConfig();
-    submitBtn.disabled=true; submitBtn.textContent='提交中…';
-    try {
-      const resp = await fetch('/api/process', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          url, mode,
-          api_key: $('llmApiKey').value.trim(),
-          base_url: $('llmBaseUrl').value.trim(),
-          model: modelSelect.value,
-          tts_api_key: $('ttsApiKey').value.trim(),
-          tts_base_url: $('ttsBaseUrl').value.trim(),
-          tts_model: $('ttsModel').value.trim(),
-          tts_voice: ttsVoice.value,
-        }),
-      });
-      const data = await resp.json();
-
-      // 重复视频 → 自定义弹窗
-      if (resp.ok && data.status === 'duplicate') {
-        submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        showDuplicateModal(data.message, data.output_path);
-        return;
-      }
-
-      if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
-      requestNotificationPermission();
-      startProgressUI(data);
-    } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
+    submitTask('');
   });
 
-  async function submitTask(force) {
+  async function submitTask(action) {
     const url = $('url').value.trim();
     const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
     if (!url) { alert('请输入 YouTube 链接'); return; }
@@ -1154,7 +1255,7 @@
       const resp = await fetch('/api/process', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
-          url, mode, force,
+          url, mode, action: action || '',
           resume_from: sessionStorage.getItem('v2l_resumeFrom') || '',
           api_key: $('llmApiKey').value.trim(),
           base_url: $('llmBaseUrl').value.trim(),
@@ -1166,20 +1267,29 @@
         }),
       });
       const data = await resp.json();
-      if (resp.ok && data.status === 'duplicate') {
+      if (resp.status === 409 && (data.status === 'queued' || data.status === 'processing')) {
         submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        showDuplicateModal(data.message, data.output_path);
+        sessionStorage.setItem('v2l_videoId', data.video_id);
+        sessionStorage.setItem('v2l_mode', data.mode);
+        sessionStorage.setItem('v2l_startedAt', String(data.started_at || Date.now()/1000));
+        await restoreTaskSession(data.video_id, data.mode);
+        if (timeline) timeline.addLogEntry(timeline.currentStageId || 1, 'ℹ️ ' + (data.message || '已恢复正在处理的任务'));
         return;
       }
-      if (!resp.ok) { showError(data.error||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
+      if (resp.ok && (data.status === 'variant_exists' || data.status === 'reuse_available')) {
+        submitBtn.disabled=false; submitBtn.textContent='开始处理';
+        showDecisionModal(data);
+        return;
+      }
+      if (!resp.ok) { showError(data.error||data.message||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
       requestNotificationPermission();
       startProgressUI(data);
     } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
   }
 
   function startProgressUI(data) {
-    videoId=data.video_id; startedAt=Date.now()/1000;
-    sessionStorage.setItem('v2l_videoId',videoId); sessionStorage.setItem('v2l_startedAt',String(startedAt));
+    videoId=data.video_id; currentMode=data.mode; startedAt=Date.now()/1000;
+    sessionStorage.setItem('v2l_videoId',videoId); sessionStorage.setItem('v2l_mode',currentMode); sessionStorage.setItem('v2l_startedAt',String(startedAt));
     formCard.classList.add('hidden'); resultCard.classList.add('hidden'); errorCard.classList.add('hidden');
     progressCard.classList.remove('hidden');
     statusBadge.textContent='排队中…'; statusBadge.className='status-badge status-queued';
@@ -1191,26 +1301,43 @@
     document.title = '[●●●] video2listener';
 
     // SSE 优先，降级到轮询
-    startSSE(videoId);
+    startSSE(videoId, currentMode);
     // 清除 retry 标记
     sessionStorage.removeItem('v2l_resumeFrom');
   }
 
   newTaskBtn.addEventListener('click', () => returnToForm(true));
   retryBtn.addEventListener('click', () => returnToForm(false));
+  progressBackBtn.addEventListener('click', () => returnToForm(false));
 
   // ── 重复视频弹窗 ────────────────────────────────────────────────────
   const duplicateModal = $('duplicateModal');
+  const duplicateTitle = $('duplicateTitle');
   const duplicateMsg = $('duplicateMsg');
   const modalDownloadBtn = $('modalDownloadBtn');
   const modalRegenerateBtn = $('modalRegenerateBtn');
+  let _modalKind = 'variant_exists';
   let _duplicateOutputPath = '';
 
-  function showDuplicateModal(message, outputPath) {
-    duplicateMsg.textContent = message || '该视频之前已处理过，是否重新生成？';
-    _duplicateOutputPath = outputPath || '';
+  function showDecisionModal(data) {
+    const labels = { podcast: '中文播客版', faithful: '忠实翻译版', condensed: '精华浓缩版' };
+    _modalKind = data.status;
+    videoId = data.video_id;
+    currentMode = data.mode;
+    duplicateMsg.textContent = data.message || '';
+    _duplicateOutputPath = data.output_path || '';
+    if (_modalKind === 'reuse_available') {
+      duplicateTitle.textContent = '♻️ 复用已有素材';
+      modalDownloadBtn.textContent = '取消';
+      modalRegenerateBtn.textContent = '生成' + (labels[currentMode] || currentMode);
+      modalRegenerateBtn.focus();
+    } else {
+      duplicateTitle.textContent = '📼 此模式已生成';
+      modalDownloadBtn.textContent = _duplicateOutputPath ? '⬇️ 下载已有文件' : '取消';
+      modalRegenerateBtn.textContent = '🔄 重新生成此模式';
+      modalDownloadBtn.focus();
+    }
     duplicateModal.classList.add('open');
-    modalDownloadBtn.focus();
   }
 
   function closeDuplicateModal() {
@@ -1219,17 +1346,16 @@
   }
 
   modalDownloadBtn.addEventListener('click', () => {
-    if (_duplicateOutputPath) {
-      // 直接用 output_path 构造下载 URL
-      window.location.href = '/api/download/' + videoId;
+    if (_modalKind === 'variant_exists' && _duplicateOutputPath) {
+      window.location.href = '/api/download/' + videoId + '/' + currentMode;
     }
     closeDuplicateModal();
-    returnToForm(true);
   });
 
   modalRegenerateBtn.addEventListener('click', () => {
+    const action = _modalKind === 'reuse_available' ? 'create_variant' : 'regenerate_variant';
     closeDuplicateModal();
-    submitTask(true);
+    submitTask(action);
   });
 
   // 点击遮罩关闭
@@ -1241,7 +1367,10 @@
   document.addEventListener('keydown', (e) => {
     if (duplicateModal.classList.contains('open')) {
       if (e.key === 'Escape') { e.preventDefault(); closeDuplicateModal(); }
-      if (e.key === 'Enter') { e.preventDefault(); modalDownloadBtn.click(); }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        (_modalKind === 'reuse_available' ? modalRegenerateBtn : modalDownloadBtn).click();
+      }
     }
     if (historyOverlay.classList.contains('open')) {
       if (e.key === 'Escape') { e.preventDefault(); closeHistoryDrawer(); }
@@ -1294,24 +1423,38 @@
       const dateStr = (t.updated_at || '').slice(0, 10);
       const title = t.title_original || t.video_id;
       const titleShort = title.length > 40 ? title.slice(0, 40) + '…' : title;
-      const modeLabel = t.mode_label || t.mode || '';
       const statusDot = STATUS_CLASS[t.status] || 'status-dot-done';
-      const modeCls = MODE_CLASS[t.mode] || '';
+      const variants = t.variants || [];
+      const modeBadges = variants.map(v =>
+        `<span class="task-row-badge ${MODE_CLASS[v.mode] || ''}">${escHtml(v.mode_label || v.mode)}</span>`
+      ).join('');
 
       // Estimate file size from duration
       const estMB = t.duration_seconds ? Math.round(t.duration_seconds * 128 / 8 / 1024) : '?';
-      const partsHTML = t.parts && t.parts.length > 0
-        ? t.parts.map(p => `<a href="/api/download/${t.video_id}" style="color:#4f46e5;">📥 ${escHtml(p.filename)}</a>`).join('<br>')
-        : (t.audio_zh_path ? '<span style="color:#9ca3af;">文件已不存在</span>' : '<span style="color:#9ca3af;">未生成</span>');
+      const variantRowsHTML = variants.length ? variants.map(v => {
+        const quality = v.audit_status === 'degraded'
+          ? '<span class="quality-chip">质量审计降级</span>'
+          : (v.audit_status === 'passed' ? '<span style="font-size:.7rem;color:#166534;margin-left:.35rem;">审计通过</span>' : '');
+        const files = v.parts && v.parts.length
+          ? v.parts.map(p => `<a href="${escHtml(p.download_url || v.download_url)}" style="color:#4f46e5;">📥 ${escHtml(p.filename)}</a>`).join(' · ')
+          : (v.audio_zh_path ? `<a href="${escHtml(v.download_url)}" style="color:#4f46e5;">📥 下载 MP3</a>` : '<span style="color:#9ca3af;">未生成</span>');
+        return `<div style="padding:.45rem 0;border-top:1px solid #eee;">
+          <span class="task-row-badge ${MODE_CLASS[v.mode] || ''}">${escHtml(v.mode_label || v.mode)}</span>
+          <span style="font-size:.75rem;color:#6b7280;">${escHtml(v.status)}</span>
+          ${quality}
+          <span>${files}</span>
+          <button class="stage-btn variant-delete" data-mode="${escHtml(v.mode)}" style="font-size:.7rem;padding:.15rem .45rem;color:#dc2626;">删除此模式</button>
+        </div>`;
+      }).join('') : '<span style="color:#9ca3af;">暂无模式输出</span>';
 
       row.innerHTML = `
         <div class="task-row-main">
           <span class="task-row-status ${statusDot}"></span>
           <span class="task-row-title" title="${escHtml(title)}">${escHtml(titleShort)}</span>
-          ${modeLabel ? `<span class="task-row-badge ${modeCls}">${escHtml(modeLabel)}</span>` : ''}
+          ${modeBadges}
           <span style="font-size:0.72rem;color:#9ca3af;">${dateStr}</span>
           <div class="task-row-actions">
-            ${(t.parts && t.parts.length > 0 || t.audio_zh_path) ? '<button class="task-row-icon" title="下载">⬇️</button>' : ''}
+            ${variants.some(v => v.audio_zh_path) ? '<button class="task-row-icon" title="下载最近模式">⬇️</button>' : ''}
             <button class="task-row-icon del" title="删除">🗑️</button>
           </div>
         </div>
@@ -1319,10 +1462,10 @@
           <span>📺 ${escHtml(t.channel_name || '未知频道')}</span>
           <span>⏱ ${t.duration_seconds ? Math.floor(t.duration_seconds/60)+' 分钟' : '未知'}</span>
           <span>📦 约 ${estMB} MB</span>
-          <span>${partsHTML}</span>
+          <span style="width:100%;">${variantRowsHTML}</span>
         </div>
         <div class="task-row-confirm">
-          <span style="font-size:0.8rem;color:#dc2626;">确认删除？</span>
+          <span style="font-size:0.8rem;color:#dc2626;">删除整个视频及全部模式记录？</span>
           <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;color:#dc2626;">确认</button>
           <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;">取消</button>
         </div>
@@ -1338,9 +1481,24 @@
       if (dlBtn) {
         dlBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          window.location.href = '/api/download/' + t.video_id;
+          const latest = variants.find(v => v.audio_zh_path);
+          if (latest) window.location.href = latest.download_url;
         });
       }
+
+      row.querySelectorAll('.variant-delete').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm(`确认删除${btn.dataset.mode}模式？其他模式和共享素材会保留。`)) return;
+          const resp = await fetch('/api/tasks/' + t.video_id + '/' + btn.dataset.mode, { method: 'DELETE' });
+          if (!resp.ok) {
+            const err = await resp.json();
+            alert('删除失败: ' + (err.error || '未知错误'));
+            return;
+          }
+          openHistoryDrawer();
+        });
+      });
 
       // Delete button → show confirm
       const delBtn = row.querySelector('.task-row-icon.del');
@@ -1391,6 +1549,8 @@
   historyOverlay.addEventListener('click', (e) => {
     if (e.target === historyOverlay) closeHistoryDrawer();
   });
+
+  if (savedVideoId) restoreTaskSession(savedVideoId, savedMode);
 })();
 </script>
 </body>

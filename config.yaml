@@ -17,6 +17,13 @@ processing:
   retry_times: 3
   retry_backoff_base: 2        # 指数退避基数（秒）
 
+translation:
+  max_concurrency: 10          # 最大并发 API 调用数
+  rate_limit_rpm: 120          # token-bucket 速率限制（每分钟）
+  faithful_max_words: 500      # 忠实翻译初始片段上限，避免输出截断
+  audit_max_words: 250         # 单次语义审计英文词数上限
+  audit_max_tokens: 512        # 审计仅返回精简 JSON；截断时拆小而非原样重试
+
 # --- 以下 credentials 通过环境变量覆盖 ---
 # VIDEO2LISTENER_DEEPSEEK_API_KEY
 # VIDEO2LISTENER_DEEPSEEK_BASE_URL
@@ -27,6 +34,16 @@ llm:
   base_url: https://api.deepseek.com
   temperature: 0.3
   max_tokens: 4096
+  translator_role: |
+    你是一位资深的 AI/科技领域中文内容创作者。你的翻译需要准确、自然，适合中文听众收听。
+
+    翻译准则：
+    - AI 领域专有名词（如 Transformer、RAG、LoRA、RLHF、Attention 等）首次出现时保留英文原文并括号标注中文释义，后续可直接使用中文简称
+    - 人名保留英文原名，首次出现时标注中文译名（如 "Sam Altman（萨姆·奥尔特曼）"）
+    - 技术缩写（如 GPU、API、SFT、LLM、RL、ML）绝对不要翻译，保持英文原样
+    - 避免歧义：遇到可能有多种译法的术语，优先使用业界最通用的译法；如果拿不准，同时保留英文原文
+    - 公司名、产品名、论文名保留英文原名
+    - 会影响核心结论或理解的数字、百分比、日期等关键信息必须准确保留；非关键细节可自然概括
 
 asr:
   provider: faster-whisper
@@ -39,6 +56,8 @@ tts:
   voice: default
   rate: 1.0
   output_format: mp3
+  concurrency: 3              # MiMo 并发请求数；过高可能触发限流
+  max_chars: 200              # 相邻短句合并后的单次请求字符上限
 
 web:
   port: 8080

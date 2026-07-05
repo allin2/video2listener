@@ -10,6 +10,21 @@ from src.config import get_config
 
 logger = logging.getLogger(__name__)
 
+VALID_MODES = {"podcast", "faithful", "condensed"}
+VARIANT_MIGRATION = "episode_variant_v1"
+_VARIANT_UPDATE_FIELDS = {
+    "variant_dir",
+    "script_zh_path",
+    "summary_path",
+    "tts_text_path",
+    "tts_segments_dir",
+    "audio_zh_path",
+    "error_message",
+    "audit_status",
+    "audit_message",
+    "translation_audit_path",
+}
+
 
 def _get_db_path() -> Path:
     cfg = get_config()
@@ -22,6 +37,7 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -47,6 +63,9 @@ def init_db() -> None:
             summary_path TEXT,
             audio_zh_path TEXT,
             error_message TEXT,
+            audit_status TEXT,
+            audit_message TEXT,
+            translation_audit_path TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -60,9 +79,95 @@ def init_db() -> None:
             created_at TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migration (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS episode_variant (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('podcast', 'faithful', 'condensed')),
+            status TEXT NOT NULL DEFAULT 'new',
+            variant_dir TEXT,
+            script_zh_path TEXT,
+            summary_path TEXT,
+            tts_text_path TEXT,
+            tts_segments_dir TEXT,
+            audio_zh_path TEXT,
+            error_message TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(video_id, mode),
+            FOREIGN KEY(video_id) REFERENCES episode(video_id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_episode_variant_updated
+        ON episode_variant(updated_at DESC)
+    """)
+    existing_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(episode_variant)").fetchall()
+    }
+    for column in ("audit_status", "audit_message", "translation_audit_path"):
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE episode_variant ADD COLUMN {column} TEXT")
+
+    migration = conn.execute(
+        "SELECT 1 FROM schema_migration WHERE name = ?", (VARIANT_MIGRATION,)
+    ).fetchone()
+    if migration is None:
+        _backfill_legacy_variants(conn)
+        conn.execute(
+            "INSERT INTO schema_migration (name, applied_at) VALUES (?, ?)",
+            (VARIANT_MIGRATION, datetime.now(timezone.utc).isoformat()),
+        )
     conn.commit()
     conn.close()
     logger.info("Database initialized at %s", _get_db_path())
+
+
+def _backfill_legacy_variants(conn: sqlite3.Connection) -> None:
+    """一次性把旧 episode 中的模式产物登记为零拷贝变体。"""
+    rows = conn.execute(
+        """SELECT video_id, mode, status, script_zh_path, summary_path,
+                  audio_zh_path, error_message, created_at, updated_at
+           FROM episode"""
+    ).fetchall()
+    for row in rows:
+        mode = row["mode"]
+        if mode not in VALID_MODES:
+            logger.warning("Skip legacy variant with unsupported mode: %s", mode)
+            continue
+
+        has_variant_data = any(
+            row[key] for key in ("script_zh_path", "summary_path", "audio_zh_path")
+        )
+        if not has_variant_data and row["status"] not in ("done", "failed", "cancelled"):
+            continue
+
+        if row["audio_zh_path"] or row["status"] == "done":
+            status = "done"
+        elif row["script_zh_path"]:
+            status = "translated"
+        elif row["status"] in ("failed", "cancelled"):
+            status = row["status"]
+        else:
+            status = "new"
+
+        conn.execute(
+            """INSERT OR IGNORE INTO episode_variant
+               (video_id, mode, status, variant_dir, script_zh_path, summary_path,
+                audio_zh_path, error_message, created_at, updated_at)
+               VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["video_id"], mode, status, row["script_zh_path"],
+                row["summary_path"], row["audio_zh_path"], row["error_message"],
+                row["created_at"], row["updated_at"],
+            ),
+        )
 
 
 def create_episode(
@@ -135,6 +240,187 @@ def get_episode(video_id: str) -> Optional[dict]:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def _validate_mode(mode: str) -> None:
+    if mode not in VALID_MODES:
+        raise ValueError(f"不支持的模式: {mode}")
+
+
+def get_variant(video_id: str, mode: str) -> Optional[dict]:
+    """查询指定视频和模式的输出变体。"""
+    _validate_mode(mode)
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM episode_variant WHERE video_id = ? AND mode = ?",
+        (video_id, mode),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_completed_variant(video_id: str, mode: str) -> Optional[dict]:
+    """查询已完成且音频文件仍有效的指定模式变体。"""
+    _validate_mode(mode)
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT * FROM episode_variant
+           WHERE video_id = ? AND mode = ? AND status = 'done'""",
+        (video_id, mode),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    audio_path = result.get("audio_zh_path")
+    if not audio_path:
+        return None
+    path = Path(audio_path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        return None
+    return result
+
+
+def list_variants(video_id: str) -> list[dict]:
+    """列出一个视频的全部模式变体。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT * FROM episode_variant
+           WHERE video_id = ? ORDER BY mode ASC""",
+        (video_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_all_variants() -> list[dict]:
+    """一次查询返回所有模式变体，供历史聚合避免逐视频查询。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM episode_variant ORDER BY updated_at DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def upsert_variant(
+    video_id: str,
+    mode: str,
+    status: str = "new",
+    **kwargs,
+) -> int:
+    """创建或更新一个模式变体，未提供的已有字段保持不变。"""
+    _validate_mode(mode)
+    unknown = set(kwargs) - _VARIANT_UPDATE_FIELDS
+    if unknown:
+        raise ValueError(f"不支持的变体字段: {sorted(unknown)}")
+
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).isoformat()
+    columns = ["video_id", "mode", "status", "created_at", "updated_at", *kwargs.keys()]
+    values = [video_id, mode, status, now, now, *kwargs.values()]
+    updates = ["status = excluded.status", "updated_at = excluded.updated_at"]
+    updates.extend(f"{field} = excluded.{field}" for field in kwargs)
+    placeholders = ", ".join("?" for _ in columns)
+    cursor = conn.execute(
+        f"""INSERT INTO episode_variant ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(video_id, mode) DO UPDATE SET {', '.join(updates)}""",
+        values,
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM episode_variant WHERE video_id = ? AND mode = ?",
+        (video_id, mode),
+    ).fetchone()
+    row_id = row["id"] if row else cursor.lastrowid
+    conn.close()
+    return row_id
+
+
+def update_variant_status(
+    video_id: str,
+    mode: str,
+    status: str,
+    error_message: Optional[str] = None,
+    **kwargs,
+) -> None:
+    """更新指定模式变体的状态和产物路径。"""
+    _validate_mode(mode)
+    unknown = set(kwargs) - _VARIANT_UPDATE_FIELDS
+    if unknown:
+        raise ValueError(f"不支持的变体字段: {sorted(unknown)}")
+
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).isoformat()
+    sets = ["status = ?", "updated_at = ?"]
+    params: list = [status, now]
+    if error_message is not None:
+        sets.append("error_message = ?")
+        params.append(error_message)
+    elif status != "failed":
+        sets.append("error_message = NULL")
+    for key, value in kwargs.items():
+        sets.append(f"{key} = ?")
+        params.append(value)
+    params.extend([video_id, mode])
+    cursor = conn.execute(
+        f"UPDATE episode_variant SET {', '.join(sets)} WHERE video_id = ? AND mode = ?",
+        params,
+    )
+    if cursor.rowcount == 0:
+        conn.close()
+        upsert_variant(
+            video_id, mode, status=status, error_message=error_message, **kwargs
+        )
+        return
+    conn.commit()
+    conn.close()
+
+
+def update_variant_artifacts(video_id: str, mode: str, **kwargs) -> None:
+    """只更新变体产物字段，不改变管道状态。
+
+    供摘要等后台任务使用，避免读取旧状态后再写回造成状态倒退。
+    """
+    _validate_mode(mode)
+    if not kwargs:
+        return
+    unknown = set(kwargs) - _VARIANT_UPDATE_FIELDS
+    if unknown:
+        raise ValueError(f"不支持的变体字段: {sorted(unknown)}")
+
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).isoformat()
+    sets = ["updated_at = ?"]
+    params: list = [now]
+    for key, value in kwargs.items():
+        sets.append(f"{key} = ?")
+        params.append(value)
+    params.extend([video_id, mode])
+    cursor = conn.execute(
+        f"UPDATE episode_variant SET {', '.join(sets)} WHERE video_id = ? AND mode = ?",
+        params,
+    )
+    if cursor.rowcount == 0:
+        conn.close()
+        raise KeyError(f"变体不存在: {video_id}:{mode}")
+    conn.commit()
+    conn.close()
+
+
+def delete_variant(video_id: str, mode: str) -> bool:
+    """删除指定模式变体记录。"""
+    _validate_mode(mode)
+    conn = _get_conn()
+    cursor = conn.execute(
+        "DELETE FROM episode_variant WHERE video_id = ? AND mode = ?",
+        (video_id, mode),
+    )
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
 
 
 def is_duplicate(video_id: str) -> Optional[dict]:

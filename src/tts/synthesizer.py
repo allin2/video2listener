@@ -1,6 +1,8 @@
 """TTS 语音合成模块。封装 Mimi TTS，支持分段合成。"""
 
+import asyncio
 import base64
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -12,6 +14,105 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+def _split_tts_segments(text: str, max_chars: int = 200) -> list[str]:
+    """将相邻短句贪心合并为接近接口上限的 TTS 请求。
+
+    cleaner 会为便于阅读和展示进度而把句子分行，但每一行都单独请求会让
+    网络往返时间远大于实际合成时间。这里保留句子顺序和换行停顿，并保证
+    每个请求不超过 ``max_chars``。
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+
+    segments: list[str] = []
+    current = ""
+
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        for pos in range(0, len(line), max_chars):
+            piece = line[pos:pos + max_chars]
+            separator = "\n" if current else ""
+            if current and len(current) + len(separator) + len(piece) > max_chars:
+                segments.append(current)
+                current = piece
+            else:
+                current = current + separator + piece
+
+    if current:
+        segments.append(current)
+
+    return segments
+
+
+def _segment_cache_manifest(
+    segments: list[str],
+    tts_config: Optional[dict],
+    use_ssml: bool,
+    speed: float,
+    max_chars: int,
+) -> dict:
+    """构造不含密钥的缓存指纹；文本、模型或音色变化都会自动失效。"""
+    config = tts_config or {}
+    encoded_segments = json.dumps(segments, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {
+        "version": 1,
+        "segments_sha256": hashlib.sha256(encoded_segments).hexdigest(),
+        "segment_count": len(segments),
+        "provider": config.get("provider", "edge"),
+        "model": config.get("model", ""),
+        "voice": config.get("voice", ""),
+        "use_ssml": bool(use_ssml),
+        "speed": float(speed),
+        "max_chars": int(max_chars),
+    }
+
+
+def _is_valid_cached_segment(path: Path, extension: str) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    if extension == ".wav":
+        with path.open("rb") as handle:
+            header = handle.read(12)
+        return len(header) == 12 and header[:4] == b"RIFF" and header[8:12] == b"WAVE"
+    return True
+
+
+def _prepare_segment_cache(
+    output_dir: Path,
+    segments: list[str],
+    extension: str,
+    manifest: dict,
+) -> dict[int, Path]:
+    """返回可复用片段；缓存指纹变化时仅清理当前模式的旧片段。"""
+    manifest_path = output_dir / "manifest.json"
+    existing_manifest = None
+    if manifest_path.is_file():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing_manifest = None
+
+    if existing_manifest != manifest:
+        for path in output_dir.glob("segment_*.*"):
+            if path.is_file():
+                path.unlink()
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {}
+
+    cached: dict[int, Path] = {}
+    for index in range(len(segments)):
+        path = output_dir / f"segment_{index:04d}{extension}"
+        if _is_valid_cached_segment(path, extension):
+            cached[index] = path
+    return cached
 
 
 def synthesize(
@@ -38,24 +139,15 @@ def synthesize(
     cfg = get_config()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 按行拆分（TTS cleaner 已按句拆分）
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    if not lines:
+    tts_cfg = cfg.get("tts", {})
+    max_chars = int((tts_config or {}).get("max_chars", tts_cfg.get("max_chars", 200)))
+    concurrency = int((tts_config or {}).get("concurrency", tts_cfg.get("concurrency", concurrency)))
+    concurrency = max(1, concurrency)
+
+    segments = _split_tts_segments(text, max_chars=max_chars)
+    if not segments:
         logger.warning("No text to synthesize")
         return []
-
-    # 合并短句为段（每段约 100-200 字，对应 30-60 秒音频）
-    segments: list[str] = []
-    current = ""
-    for line in lines:
-        if len(current) + len(line) < 200:
-            current += line
-        else:
-            if current:
-                segments.append(current)
-            current = line
-    if current:
-        segments.append(current)
 
     audio_files: list[Path] = []
     total = len(segments)
@@ -65,16 +157,30 @@ def synthesize(
     speed = (tts_config or {}).get("speed", 1.0)
     extension = ".wav" if provider == "mimi" else ".mp3"
 
+    manifest = _segment_cache_manifest(
+        segments, tts_config, use_ssml, speed, max_chars,
+    )
+    cached_results = _prepare_segment_cache(
+        output_dir, segments, extension, manifest,
+    )
+    cached_count = len(cached_results)
+
+    if on_progress:
+        suffix = f"，复用 {cached_count}" if cached_count else ""
+        on_progress(f"TTS 合成中... ({cached_count}/{total}{suffix})")
+
     if concurrency > 1:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             future_to_index: dict = {}
             for i, seg in enumerate(segments):
                 out_path = output_dir / f"segment_{i:04d}{extension}"
+                if i in cached_results:
+                    continue
                 future = executor.submit(_synthesize_segment, seg, out_path, tts_config, use_ssml, speed)
                 future_to_index[future] = (i, out_path)
 
-            results: dict[int, Path] = {}
-            completed_count = 0
+            results: dict[int, Path] = dict(cached_results)
+            completed_count = cached_count
             try:
                 for future in as_completed(future_to_index):
                     i, out_path = future_to_index[future]
@@ -91,21 +197,37 @@ def synthesize(
 
             audio_files = [results[k] for k in sorted(results)]
     else:
+        completed_count = cached_count
         for i, seg in enumerate(segments):
             out_path = output_dir / f"segment_{i:04d}{extension}"
 
-            if on_progress:
-                on_progress(f"TTS 合成中... ({i + 1}/{total})")
+            if i in cached_results:
+                audio_files.append(cached_results[i])
+                continue
 
             try:
                 _synthesize_segment(seg, out_path, tts_config, use_ssml, speed)
                 audio_files.append(out_path)
+                completed_count += 1
+                if on_progress:
+                    on_progress(f"TTS 合成中... ({completed_count}/{total})")
             except Exception as e:
                 logger.error("TTS segment %d failed: %s", i, e)
                 raise RuntimeError(f"TTS 合成失败 (segment {i}): {e}")
 
     logger.info("TTS synthesis complete: %d segments", len(audio_files))
     return audio_files
+
+
+async def synthesize_async(
+    text: str,
+    output_dir: Path,
+    on_progress: Optional[callable] = None,
+    tts_config: Optional[dict] = None,
+    concurrency: int = 3,
+) -> list[Path]:
+    """异步包装——将同步 synthesize 卸载到线程池。"""
+    return await asyncio.to_thread(synthesize, text, output_dir, on_progress, tts_config, concurrency)
 
 
 def _synthesize_segment(text: str, output_path: Path, tts_config: Optional[dict] = None,
@@ -141,20 +263,19 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
     model = (tts_config or {}).get("model", "mimo-v2.5-tts")
     voice = (tts_config or {}).get("voice", "苏打")
 
-    # Clamp speed to MiMo supported range 0.25-4.0
-    speed = max(0.25, min(4.0, speed))
-
+    # MiMo TTS 官方格式：user 消息放风格指令，assistant 消息放朗读文本
+    # speed 参数有已知 bug（越大反而越慢），不传
     endpoint = base_url.rstrip("/") + "/chat/completions"
 
     payload = json.dumps({
         "model": model,
         "messages": [
+            {"role": "user", "content": "语气自然流畅，像播客主持人在娓娓道来"},
             {"role": "assistant", "content": text},
         ],
         "audio": {
             "format": "wav",
             "voice": voice,
-            "speed": speed,
         },
     }).encode("utf-8")
 
@@ -164,18 +285,16 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
         "Content-Type": "application/json",
     })
 
-    # 直连，不走代理（环境变量 + 显式 ProxyHandler）
-    import os as _os
+    # 每个请求使用独立的无代理 opener。不要修改进程级代理环境变量，
+    # 否则并发合成时多个线程会互相覆盖环境状态。
     import time as _time
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
-    old_proxies = {k: _os.environ.pop(k, None) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "no_proxy", "NO_PROXY")}
-    # 使用 ProxyHandler({}) 确保 urllib 不走系统代理
     proxy_handler = urllib.request.ProxyHandler({})
     opener = urllib.request.build_opener(proxy_handler)
 
     def _call_api():
-        """同步 API 调用（在代理清除后的环境中执行）。"""
+        """同步 API 调用，网络异常时最多重试一次。"""
+        last_error: Optional[Exception] = None
         for attempt in range(2):
             try:
                 with opener.open(req, timeout=120) as resp:
@@ -184,26 +303,15 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
                 detail = exc.read().decode("utf-8", errors="replace")[:1000]
                 raise RuntimeError(f"MiMo TTS API 返回 HTTP {exc.code}: {detail}") from exc
             except Exception as exc:
+                last_error = exc
                 logger.warning("MiMo TTS attempt %d/2 failed: %s", attempt + 1, str(exc)[:150])
                 if attempt < 1:
                     _time.sleep(2)
-        return None
+        raise RuntimeError(f"MiMo TTS 网络请求失败，已重试 2 次: {last_error}") from last_error
 
-    response_body = None
-    last_error = None
-    try:
-        try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_call_api)
-                response_body = future.result(timeout=300)  # 硬超时 5 分钟
-        except FuturesTimeoutError:
-            raise RuntimeError("MiMo TTS 请求超时（5 分钟），已放弃")
-        if response_body is None:
-            raise RuntimeError(f"MiMo TTS 失败，已重试 2 次: {last_error}")
-    finally:
-        for k, v in old_proxies.items():
-            if v is not None:
-                _os.environ[k] = v
+    # opener.open 自身已有 120 秒网络超时。原先每个片段再创建一个单线程池
+    # 不会真正缩短阻塞时间，反而为数百个片段重复创建和销毁线程。
+    response_body = _call_api()
 
     try:
         response_data = json.loads(response_body)
@@ -214,6 +322,8 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
 
     if not audio_bytes:
         raise RuntimeError("MiMo TTS 返回了空音频")
+    if len(audio_bytes) < 12 or audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        raise RuntimeError("MiMo TTS 返回的音频不是有效 WAV")
 
     output_path.write_bytes(audio_bytes)
     logger.info("Mimi TTS: model=%s voice=%s -> %s (size=%d)", model, voice, output_path, output_path.stat().st_size)

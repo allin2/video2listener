@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>同视频多模式音频变体复用 — 实施计划</title>
+  <style>
+    :root {
+      --bg: #f4f6fb;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --ink: #172033;
+      --muted: #5e6b82;
+      --line: #dbe2ee;
+      --accent: #4f46e5;
+      --accent-soft: #eef0ff;
+      --accent-text: #3730a3;
+      --green-soft: #eaf8ef;
+      --green-text: #166534;
+      --amber-soft: #fff7df;
+      --amber-text: #854d0e;
+      --red-soft: #fff0f0;
+      --red-text: #991b1b;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+      --shadow: 0 18px 48px rgba(30, 41, 59, .08);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font: 15px/1.68 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code { font-size: .92em; }
+    .page { width: min(1100px, calc(100% - 32px)); margin: 28px auto 64px; }
+    .hero, .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .hero { padding: 34px 38px 30px; }
+    .eyebrow { color: var(--accent); font-size: .78rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 8px 0 10px; font-size: clamp(1.8rem, 4vw, 2.7rem); line-height: 1.18; letter-spacing: -.02em; }
+    .subtitle { margin: 0; max-width: 74ch; color: var(--muted); font-size: 1.04rem; }
+    .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 24px; }
+    .meta {
+      padding: 11px 13px;
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .meta b { display: block; color: var(--muted); font-size: .72rem; font-weight: 700; text-transform: uppercase; }
+    .meta span { display: block; margin-top: 3px; font-weight: 700; overflow-wrap: anywhere; }
+    nav {
+      position: sticky;
+      top: 10px;
+      z-index: 5;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 16px 0;
+      padding: 11px;
+      background: rgba(255, 255, 255, .94);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      backdrop-filter: blur(10px);
+    }
+    nav a { padding: 6px 10px; color: var(--muted); border-radius: 8px; font-size: .84rem; font-weight: 700; }
+    nav a:hover { color: var(--accent-text); background: var(--accent-soft); text-decoration: none; }
+    .section { margin-top: 16px; padding: 30px 34px; }
+    h2 { margin: 0 0 18px; font-size: 1.55rem; line-height: 1.3; }
+    h3 { margin: 26px 0 10px; font-size: 1.12rem; }
+    h4 { margin: 20px 0 8px; font-size: 1rem; }
+    p { max-width: 76ch; }
+    ul, ol { padding-left: 1.35rem; }
+    li + li { margin-top: 6px; }
+    .callout { padding: 15px 17px; border-radius: 13px; background: var(--accent-soft); color: var(--accent-text); }
+    .callout.warn { background: var(--amber-soft); color: var(--amber-text); }
+    .callout.danger { background: var(--red-soft); color: var(--red-text); }
+    .callout.success { background: var(--green-soft); color: var(--green-text); }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    .chip { display: inline-flex; align-items: center; padding: 5px 9px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: .78rem; font-weight: 800; }
+    .chip.green { background: var(--green-soft); color: var(--green-text); }
+    .chip.amber { background: var(--amber-soft); color: var(--amber-text); }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .card { padding: 17px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; }
+    .card h3, .card h4 { margin-top: 0; }
+    .table-wrap { overflow-x: auto; margin: 14px 0; border: 1px solid var(--line); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; min-width: 720px; background: var(--surface); }
+    th, td { padding: 11px 13px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: var(--surface-2); color: var(--muted); font-size: .77rem; letter-spacing: .02em; }
+    tr:last-child td { border-bottom: 0; }
+    .id { white-space: nowrap; color: var(--accent-text); font-weight: 850; }
+    pre { overflow-x: auto; margin: 12px 0; padding: 16px; color: var(--code-ink); background: var(--code-bg); border-radius: 12px; font-size: .84rem; line-height: 1.55; }
+    .unit { margin-top: 18px; padding: 22px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(180deg, #fff, #fbfcff); }
+    .unit h3 { margin: 0 0 6px; }
+    .unit-meta { color: var(--muted); font-size: .86rem; }
+    .trace { font-size: .86rem; color: var(--muted); }
+    .checklist { list-style: none; padding-left: 0; }
+    .checklist li { position: relative; padding-left: 1.75rem; }
+    .checklist li::before { content: "□"; position: absolute; left: 0; color: var(--accent); font-weight: 900; }
+    footer { margin-top: 18px; padding: 18px 4px; color: var(--muted); font-size: .8rem; text-align: center; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      .page { width: min(100% - 18px, 1100px); margin-top: 10px; }
+      .hero, .section { padding: 23px 19px; border-radius: 14px; }
+      .meta-grid, .grid-2 { grid-template-columns: 1fr; }
+      nav { position: static; }
+    }
+    @media print {
+      body { background: #fff; }
+      .page { width: 100%; margin: 0; }
+      .hero, .section { box-shadow: none; break-inside: avoid; }
+      nav { display: none; }
+    }
+  </style>
+</head>
+<body>
+<main class="page">
+  <header class="hero">
+    <div class="eyebrow">Implementation Plan · Deep</div>
+    <h1>同视频多模式音频变体复用</h1>
+    <p class="subtitle">将视频级共享源资产与模式级输出彻底分离：同一链接生成忠实、播客、精华模式时复用下载、转写和清洗结果，同时长期保留每个模式独立的译文、TTS 分段和 MP3。</p>
+    <div class="meta-grid" aria-label="计划元数据">
+      <div class="meta"><b>Type</b><span>feat</span></div>
+      <div class="meta"><b>Date</b><span><time datetime="2026-07-03">2026-07-03</time></span></div>
+      <div class="meta"><b>Topic</b><span>multi-mode-audio-variants</span></div>
+      <div class="meta"><b>artifact_contract</b><span>ce-unified-plan/v1</span></div>
+      <div class="meta"><b>artifact_readiness</b><span>implementation-ready</span></div>
+      <div class="meta"><b>product_contract_source</b><span>ce-plan-bootstrap from docs/prds/multi-mode-audio-variants-v1.0-prd.html</span></div>
+      <div class="meta"><b>execution</b><span>code</span></div>
+      <div class="meta"><b>Open blockers</b><span>none</span></div>
+    </div>
+  </header>
+
+  <nav aria-label="计划导航">
+    <a href="#goal-capsule">目标</a>
+    <a href="#product-contract">产品契约</a>
+    <a href="#product-requirements">需求</a>
+    <a href="#planning-contract">技术契约</a>
+    <a href="#implementation-units">实施单元</a>
+    <a href="#verification-contract">验证</a>
+    <a href="#definition-of-done">完成标准</a>
+    <a href="#appendix">附录</a>
+  </nav>
+
+  <section class="section" id="goal-capsule">
+    <h2>Goal Capsule</h2>
+    <div class="callout success"><strong>目标结果：</strong>同一视频首次处理后，后续选择另一个模式只执行翻译、TTS 和合并；三个模式的输出互不覆盖，页面明确说明将复用哪些缓存，并可分别下载、重试和删除。</div>
+    <div class="grid-2">
+      <article class="card">
+        <h3>为什么现在做</h3>
+        <p>当前 <code>episode.video_id</code> 是唯一键，重复检测只看视频 ID；模式特定文件写在共享目录根部，强制生成会删除并覆盖上一模式。结果是重复执行昂贵的共享阶段，且用户选了新模式仍可能得到旧模式音频。</p>
+      </article>
+      <article class="card">
+        <h3>战略一致性</h3>
+        <p>该改动直接服务 <code>STRATEGY.md</code> 的“管道效率”和“输出质量”：降低同源内容二次生成耗时，并确保忠实、播客、精华三种内容组织方式真实可区分。</p>
+      </article>
+    </div>
+    <div class="chips">
+      <span class="chip green">共享阶段全部复用</span>
+      <span class="chip green">三种模式永久共存</span>
+      <span class="chip">唯一维度仅为 mode</span>
+      <span class="chip amber">同一视频串行生成</span>
+    </div>
+  </section>
+
+  <section class="section" id="product-contract">
+    <h2>Product Contract</h2>
+    <h3>问题框架</h3>
+    <p>用户提交同一 YouTube 链接、但选择不同输出模式时，下载、字幕/音频转写和清洗输入完全相同。系统应提示“已有源素材，将复用缓存生成新模式”，而不是把它当作同一结果的重新生成。只有用户选择已存在的同一模式时，才进入“下载已有 / 重新生成该模式”的分支。</p>
+
+    <h3>关键产品决策</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>决策</th><th>原因</th></tr></thead>
+        <tbody>
+          <tr id="k1"><td class="id">K1.</td><td>共享资产边界固定为下载、转写、清洗。</td><td>这些步骤只依赖视频源，不依赖输出模式。</td></tr>
+          <tr id="k2"><td class="id">K2.</td><td>模式变体边界固定为翻译、摘要、TTS 清洗、TTS 分段、合并 MP3。</td><td>这些产物由模式提示词决定，必须隔离。</td></tr>
+          <tr id="k3"><td class="id">K3.</td><td>同一 <code>video_id + mode</code> 只有一个当前版本。</td><td>符合“只按模式”唯一化要求；音色、模型和参数变化不创建额外版本。</td></tr>
+          <tr id="k4"><td class="id">K4.</td><td>不同模式使用“复用缓存并生成”提示；同模式才使用“下载已有 / 重新生成”。</td><td>让用户准确理解操作后果。</td></tr>
+          <tr id="k5"><td class="id">K5.</td><td>保留三个模式的全部 MP3，不因生成其他模式而覆盖或删除。</td><td>支持长期比较和重复收听。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>核心流程</h3>
+    <div class="grid-2">
+      <article class="card" id="f1"><h4>F1. 首次处理</h4><p>提交新链接 → 下载 → 转写 → 清洗 → 目标模式翻译 → TTS → 合并 → 保存共享记录和模式变体。</p></article>
+      <article class="card" id="f2"><h4>F2. 新模式复用</h4><p>提交已处理链接 + 不同模式 → 提示将复用下载/转写/清洗 → 用户确认生成 → 前三阶段显示“复用缓存” → 仅执行模式阶段。</p></article>
+      <article class="card" id="f3"><h4>F3. 同模式命中</h4><p>提交已处理链接 + 已存在模式 → 提供“下载已有文件”和“重新生成此模式” → 重生成只清理目标模式目录。</p></article>
+      <article class="card" id="f4"><h4>F4. 历史管理</h4><p>历史记录按视频聚合，展开显示多个模式；每个模式拥有独立状态、下载和删除操作。</p></article>
+      <article class="card" id="f5"><h4>F5. 失败恢复</h4><p>某模式翻译或 TTS 失败 → 共享源仍保持可用 → 只从该模式失败阶段恢复，不影响其他模式。</p></article>
+    </div>
+
+    <h3>范围边界</h3>
+    <div class="grid-2">
+      <article class="card"><h4>本计划包含</h4><ul><li>数据库增量迁移和旧数据回填</li><li>模式目录隔离和共享阶段复用</li><li>模式感知的提交、状态、取消、下载与删除</li><li>重复提示、进度时间线和历史抽屉改造</li><li>自动化测试与手工端到端验证</li></ul></article>
+      <article class="card"><h4>不包含</h4><ul><li>按音色、TTS 模型或 LLM 模型保存多版本</li><li>同一模式的历史快照或版本回滚</li><li>云对象存储、跨设备同步</li><li>同一视频多模式并行执行</li><li>批量迁移旧文件到新目录</li></ul></article>
+    </div>
+  </section>
+
+  <section class="section" id="product-requirements">
+    <h2>Product Requirements</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>需求</th><th>验收口径</th></tr></thead>
+        <tbody>
+          <tr id="r1"><td class="id">R1.</td><td>一个视频只保存一份共享源记录。</td><td>数据库中 <code>episode.video_id</code> 继续唯一；metadata、captions、clean transcript 不按模式复制。</td></tr>
+          <tr id="r2"><td class="id">R2.</td><td>每个视频最多拥有 podcast、faithful、condensed 三个模式变体。</td><td><code>episode_variant(video_id, mode)</code> 唯一；模式值由服务端白名单校验。</td></tr>
+          <tr id="r3"><td class="id">R3.</td><td>同视频新模式必须跳过下载、转写、清洗。</td><td>共享文件有效时，流水线不调用 YouTube 提取器、Whisper 或 cleaner，并发送复用阶段事件。</td></tr>
+          <tr id="r4"><td class="id">R4.</td><td>模式产物互相隔离。</td><td>新产物写入 <code>variants/&lt;mode&gt;/</code>；重试或重生成不得删除其他模式文件。</td></tr>
+          <tr id="r5"><td class="id">R5.</td><td>不同模式提交显示复用提示。</td><td>提示明确列出复用下载、转写、清洗，主按钮为“生成&lt;模式&gt;版”，文案不出现“重新生成”。</td></tr>
+          <tr id="r6"><td class="id">R6.</td><td>同模式命中显示已有结果选择。</td><td>用户可直接下载或明确重生成该模式；重生成只覆盖该模式当前版本。</td></tr>
+          <tr id="r7"><td class="id">R7.</td><td>状态、SSE、取消按模式定位。</td><td>同一视频不同模式的状态不会串线；取消只作用于当前模式任务。</td></tr>
+          <tr id="r8"><td class="id">R8.</td><td>历史记录展示视频下的全部模式。</td><td>每个模式显示独立状态、更新时间、文件 Part 和下载入口。</td></tr>
+          <tr id="r9"><td class="id">R9.</td><td>旧数据无损可用。</td><td>升级后旧 MP3 仍能下载；迁移不移动、不改写旧文件，且不会在用户删除后被再次回填。</td></tr>
+          <tr id="r10"><td class="id">R10.</td><td>不同模式默认串行。</td><td>同一视频已有 queued/processing 任务时，另一模式返回 409 和明确提示；不同视频仍可并发。</td></tr>
+          <tr id="r11"><td class="id">R11.</td><td>缺失或损坏缓存自动降级。</td><td>数据库有记录但共享文件为空/缺失时，只从最早缺失共享阶段恢复，不误判为可复用。</td></tr>
+          <tr id="r12"><td class="id">R12.</td><td>旧客户端在迁移期保持可用。</td><td>旧下载/状态接口继续解析到默认或最近模式；新 UI 只调用模式感知接口。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>反向需求</h3>
+    <ul>
+      <li id="a1"><span class="id">A1.</span> 不允许 <code>force=true</code> 清理共享目录根部所有 MP3 或全部 <code>tts_segments</code>。</li>
+      <li id="a2"><span class="id">A2.</span> 不允许使用 <code>episode.mode</code> 判断请求模式是否已有输出。</li>
+      <li id="a3"><span class="id">A3.</span> 不允许仅靠文件名猜测模式；数据库变体记录是模式归属的权威来源。</li>
+      <li id="a4"><span class="id">A4.</span> 不允许迁移过程批量移动用户旧文件，避免中断、同盘空间和路径回滚风险。</li>
+    </ul>
+  </section>
+
+  <section class="section" id="planning-contract">
+    <h2>Planning Contract</h2>
+    <h3>现状取证</h3>
+    <ul>
+      <li><code>src/storage/db.py</code> 的 <code>episode.video_id</code> 唯一，且共享字段与 <code>mode/script_zh_path/audio_zh_path</code> 混在同一行；<code>is_duplicate()</code> 只按 video_id。</li>
+      <li><code>src/pipeline/orchestrator.py</code> 在共享 <code>data_dir</code> 根部写译文、TTS 和 MP3；force 清理会删除根部全部 MP3 和 <code>tts_segments</code>。</li>
+      <li><code>src/pipeline/state.py</code> 的阶段恢复按共享目录固定文件名推断，无法区分模式。</li>
+      <li><code>src/web/server.py</code> 的 <code>_task_states</code>、SSE、取消和下载都只以 video_id 为键。</li>
+      <li><code>src/web/static/index.html</code> 只有通用 duplicate 弹窗，历史下载也只调用 <code>/api/download/{video_id}</code>。</li>
+    </ul>
+
+    <h3>关键技术决策</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>技术决策</th><th>约束与理由</th></tr></thead>
+        <tbody>
+          <tr id="ktd1"><td class="id">KTD1.</td><td>新增 <code>episode_variant</code>，保留 <code>episode</code> 为共享源表。</td><td>增量迁移风险最小；第一版不删除 episode 的旧模式字段，作为兼容读取。</td></tr>
+          <tr id="ktd2"><td class="id">KTD2.</td><td>新增 <code>schema_migration</code> 并执行一次性、事务化回填。</td><td><code>INSERT OR IGNORE</code> 每次启动会复活用户删除的旧变体；迁移标记可避免该问题。</td></tr>
+          <tr id="ktd3"><td class="id">KTD3.</td><td>旧变体零拷贝回填，新变体使用 <code>variants/&lt;mode&gt;/</code>。</td><td>旧行直接引用原路径；只有重生成时才在新目录写入，不做批量文件移动。</td></tr>
+          <tr id="ktd4"><td class="id">KTD4.</td><td>共享阶段和变体阶段使用两个状态对象。</td><td><code>episode.status</code> 表示共享源进度；<code>episode_variant.status</code> 表示翻译到完成，变体失败不污染共享源。</td></tr>
+          <tr id="ktd5"><td class="id">KTD5.</td><td>内存任务键为 <code>(video_id, mode)</code>，另设 video_id 级互斥。</td><td>状态与取消精确定位模式，同时落实同视频串行、不同视频可并发。</td></tr>
+          <tr id="ktd6"><td class="id">KTD6.</td><td><code>POST /api/process</code> 使用显式 <code>action</code> 两阶段确认。</td><td>无 action 时只返回决策；<code>create_variant</code> 或 <code>regenerate_variant</code> 才启动任务，避免把 force 语义继续扩散。</td></tr>
+          <tr id="ktd7"><td class="id">KTD7.</td><td>新状态、取消、下载路由都带 mode；旧路由作为兼容别名。</td><td>消除歧义，同时允许旧页面或书签在过渡期继续工作。</td></tr>
+          <tr id="ktd8"><td class="id">KTD8.</td><td>缓存有效性以数据库路径 + 非空文件检查为准。</td><td>不能只依赖 DB 状态；共享文件缺失时必须重新执行最早缺失阶段。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>目标数据模型</h3>
+    <pre><code>CREATE TABLE IF NOT EXISTS schema_migration (
+  name TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS episode_variant (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  video_id TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('podcast','faithful','condensed')),
+  status TEXT NOT NULL DEFAULT 'new',
+  variant_dir TEXT,
+  script_zh_path TEXT,
+  summary_path TEXT,
+  tts_text_path TEXT,
+  tts_segments_dir TEXT,
+  audio_zh_path TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(video_id, mode),
+  FOREIGN KEY(video_id) REFERENCES episode(video_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_episode_variant_updated
+  ON episode_variant(updated_at DESC);</code></pre>
+    <p class="callout warn"><strong>迁移约束：</strong><code>_get_conn()</code> 必须启用 <code>PRAGMA foreign_keys=ON</code>。迁移事务先建表、再回填、最后写入迁移标记；任一步失败均回滚。已有 <code>episode</code> 列第一版不删除。</p>
+
+    <h3>目标文件布局</h3>
+    <pre><code>data/&lt;safe-title&gt;/
+├── metadata.json                 # shared
+├── captions_en.json              # shared
+├── transcript_clean.txt          # shared
+├── source.wav / source.m4a       # shared
+└── variants/
+    ├── faithful/
+    │   ├── script_zh.txt
+    │   ├── summary.json
+    │   ├── tts_text.txt
+    │   ├── tts_segments/
+    │   └── &lt;title&gt;_faithful.mp3
+    ├── podcast/
+    └── condensed/</code></pre>
+
+    <h3>API 契约</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>接口</th><th>用途</th><th>关键响应/行为</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /api/process</code></td><td>预检或启动</td><td>无 action：返回 <code>queued</code>、<code>reuse_available</code> 或 <code>variant_exists</code>。带 <code>create_variant</code>/<code>regenerate_variant</code>：启动任务。</td></tr>
+          <tr><td><code>GET /api/status/{video_id}/{mode}</code></td><td>轮询状态</td><td>返回目标模式状态、共享复用信息、阶段数组和输出路径。</td></tr>
+          <tr><td><code>GET /api/status/{video_id}/{mode}/stream</code></td><td>SSE 进度</td><td>共享阶段发送 <code>stage_reused</code>，变体阶段发送现有 stage 事件。</td></tr>
+          <tr><td><code>POST /api/cancel/{video_id}/{mode}</code></td><td>取消模式任务</td><td>只设置该模式 cancel_event；不清理其他模式。</td></tr>
+          <tr><td><code>GET /api/download/{video_id}/{mode}</code></td><td>下载指定模式</td><td>从 variant 行读取主 MP3；多 Part 由任务列表给出独立索引。</td></tr>
+          <tr><td><code>GET /api/tasks</code></td><td>历史聚合</td><td>一条视频记录含 <code>variants[]</code>，每项有 mode/status/parts/updated_at。</td></tr>
+          <tr><td><code>DELETE /api/tasks/{video_id}/{mode}</code></td><td>删除单个变体</td><td>新目录可整体删除；零拷贝旧变体只删 DB 行，不碰共享根目录文件。</td></tr>
+          <tr><td><code>DELETE /api/tasks/{video_id}</code></td><td>删除整个视频</td><td>强确认后删除所有变体记录和源记录；文件清理遵循显式安全策略。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre><code>// POST /api/process request
+{
+  "url": "https://youtube.com/watch?v=...",
+  "mode": "condensed",
+  "action": "create_variant" // omitted | create_variant | regenerate_variant
+}
+
+// Different mode, confirmation required
+{
+  "status": "reuse_available",
+  "video_id": "...",
+  "mode": "condensed",
+  "reused_stages": ["download", "transcribe", "clean"],
+  "existing_modes": ["faithful"]
+}
+
+// Same mode already exists
+{
+  "status": "variant_exists",
+  "video_id": "...",
+  "mode": "faithful",
+  "download_url": "/api/download/.../faithful"
+}</code></pre>
+
+    <h3>状态与恢复规则</h3>
+    <ol>
+      <li>先调用共享资产解析器，逐项验证 metadata、字幕/音频和 clean transcript。</li>
+      <li>共享完整时，将下载、转写、清洗标记为 reused/done，不调用对应处理函数。</li>
+      <li>读取目标 variant；不存在则创建 new，存在且 action 为 regenerate 时只清理其 <code>variant_dir</code>。</li>
+      <li>变体状态仅由目标模式目录文件推断；<code>check_stage_file()</code> 接受 shared_dir 和 variant_dir，禁止扫共享根部 MP3。</li>
+      <li>取消或失败保留有效共享资产；翻译失败可从 shared-ready 重试，TTS 失败可从 translated 重试。</li>
+    </ol>
+
+    <h3>风险与缓解</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>风险</th><th>影响</th><th>缓解</th></tr></thead>
+        <tbody>
+          <tr><td>迁移错误关联旧模式</td><td>旧文件下载到错误模式</td><td>仅使用 episode.mode 回填一条变体；记录迁移日志；不根据文件名猜测。</td></tr>
+          <tr><td>共享状态被变体失败覆盖</td><td>下次错误重跑下载/转写</td><td>共享与变体更新函数分离；异常路径只写 variant。</td></tr>
+          <tr><td>force 清理越界</td><td>其他模式 MP3 丢失</td><td>删除函数只接收 variant_dir，并加路径归属断言与回归测试。</td></tr>
+          <tr><td>旧 SSE/状态路径串线</td><td>UI 显示另一模式进度</td><td>统一 <code>task_key(video_id, mode)</code> helper；所有读写均通过 helper。</td></tr>
+          <tr><td>旧文件不在 variants 目录</td><td>删除语义危险</td><td>legacy variant 标记为零拷贝；单模式删除不删除根目录物理文件。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section" id="implementation-units">
+    <h2>Implementation Units</h2>
+
+    <article class="unit" id="u1">
+      <h3>U1. 数据库迁移与变体存储层</h3>
+      <div class="unit-meta">依赖：无 · 覆盖：R1, R2, R9, R11 · 关键决策：KTD1, KTD2, KTD3</div>
+      <p><strong>目标：</strong>建立共享 episode + 模式 variant 的持久化边界，并安全承接现有数据。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/storage/db.py</code> — schema、迁移、variant CRUD、聚合查询</li><li><code>tests/test_storage.py</code> — 新增迁移和 CRUD 测试</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>在每个连接启用 foreign keys；创建 <code>schema_migration</code> 和 <code>episode_variant</code>。</li>
+        <li>事务内执行 <code>episode_variant_v1</code> 回填：每条旧 episode 最多生成一条 mode 变体，路径原样引用；根据 audio/script 是否存在推断 done/translated/failed。</li>
+        <li>迁移成功后写 marker；再次启动不得重复回填。</li>
+        <li>新增 <code>get_variant</code>、<code>list_variants</code>、<code>upsert_variant</code>、<code>update_variant_status</code>、<code>delete_variant</code>；限制可更新字段白名单，避免动态 SQL 注入。</li>
+        <li>将 duplicate 查询替换为“共享是否存在”和“指定模式是否完成”两个明确函数；保留旧函数一段时间但不用于新流程。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>空数据库初始化后两张新表和索引存在。</li><li>旧 done episode 回填为对应模式 done variant，路径不改变。</li><li>迁移二次运行不新增行；删除回填 variant 后重启不会复活。</li><li>同 video + mode 重复 upsert 更新一行；不同 mode 共存三行。</li><li>删除 episode 级联删除 variant；非法 mode 被拒绝。</li></ul>
+      <p class="trace"><strong>完成信号：</strong>迁移可重复启动且数据无损，variant CRUD 不再读写 episode 的旧模式字段。</p>
+    </article>
+
+    <article class="unit" id="u2">
+      <h3>U2. 共享/变体路径与阶段状态重构</h3>
+      <div class="unit-meta">依赖：U1 · 覆盖：R3, R4, R9, R11 · 关键决策：KTD3, KTD4, KTD8</div>
+      <p><strong>目标：</strong>让文件系统状态检测明确区分共享目录和目标模式目录。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/pipeline/state.py</code> — 共享阶段与变体阶段检查</li><li><code>src/pipeline/orchestrator.py</code> — 路径 helper 和 legacy 解析</li><li><code>tests/test_pipeline.py</code> — 状态推断、旧路径和隔离测试</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>新增 <code>variant_dir(data_dir, mode)</code> 和合法模式校验，所有新模式产物只从该 helper 派生。</li>
+        <li>拆分 <code>check_shared_stage_files(data_dir)</code> 与 <code>check_variant_stage_files(variant_dir)</code>；MP3 仅在 variant_dir 扫描。</li>
+        <li>将 <code>_existing_stage_paths</code> 拆成 shared 恢复和 legacy variant 恢复，避免把根部任意 MP3 关联到新模式。</li>
+        <li>输出文件名追加 mode，保证用户下载后也能区分，例如 <code>&lt;title&gt;_condensed.mp3</code>。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>faithful MP3 存在时 condensed 仍为 new。</li><li>旧根部 MP3 只被迁移记录指定的 mode 识别。</li><li>脚本更新时间晚于目标 mode MP3 时仅该 mode 的 TTS 状态失效。</li><li>共享 transcript 缺失时三种模式都不能标记为 source-reused。</li></ul>
+    </article>
+
+    <article class="unit" id="u3">
+      <h3>U3. 流水线复用、重生成与失败恢复</h3>
+      <div class="unit-meta">依赖：U1, U2 · 覆盖：R3, R4, R7, R10, R11 · 关键决策：KTD4, KTD5, KTD8</div>
+      <p><strong>目标：</strong>把 orchestrator 变为“确保共享源就绪 → 处理目标变体”，消除跨模式覆盖。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/pipeline/orchestrator.py</code> — 两阶段编排、变体状态写入、范围化清理</li><li><code>src/pipeline/state.py</code> — 状态枚举/恢复支持</li><li><code>tests/test_pipeline.py</code> — mock 调用次数和恢复回归</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>提取 <code>ensure_shared_source()</code>：只在共享文件缺失时执行 extractor/transcriber/cleaner，并只更新 episode。</li>
+        <li>提取 <code>process_variant()</code>：翻译、摘要、TTS、merge 都接收 variant_dir，并只更新 episode_variant。</li>
+        <li>把 <code>force</code> 替换为内部明确 action；<code>regenerate_variant</code> 只调用 <code>cleanup_variant_outputs(variant_dir, resume_from)</code>。</li>
+        <li>共享缓存命中时发送三条结构化复用消息/事件，供 UI 标记阶段完成。</li>
+        <li>以 video_id 级锁串行不同 mode；锁释放必须放在 finally。任务结果携带 mode 和模式下载路径。</li>
+        <li>异常和取消只更新目标 variant；共享阶段失败时才更新 episode 共享状态。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>已有完整 shared + faithful，新建 podcast 时 extractor/transcriber/cleaner 调用次数均为 0，translator/TTS 各执行一次。</li><li>重生成 podcast 后 faithful 的脚本、segments、MP3 hash 与 mtime 不变。</li><li>podcast 翻译失败不改变 faithful done，也不使 episode shared 失效。</li><li>同视频第二模式并发提交被拒绝；不同视频可同时处理。</li><li>共享 transcript 丢失时从转写/清洗阶段恢复，而不是盲目复用。</li></ul>
+    </article>
+
+    <article class="unit" id="u4">
+      <h3>U4. 模式感知任务状态与 API</h3>
+      <div class="unit-meta">依赖：U1, U3 · 覆盖：R5, R6, R7, R10, R12 · 关键决策：KTD5, KTD6, KTD7</div>
+      <p><strong>目标：</strong>让提交决策、运行状态、SSE、取消和下载都精确指向模式。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/web/server.py</code> — task key、process 决策、模式路由、兼容路由</li><li><code>tests/test_web.py</code> — API/SSE/并发/兼容测试</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>引入唯一 <code>_task_key(video_id, mode)</code> helper；改造 <code>_get_task_state</code>、<code>_set_task_state</code>、SSE 发射和 progress append，禁止散落字符串拼接。</li>
+        <li><code>POST /api/process</code> 先做 variant 决策：同模式完成 → <code>variant_exists</code>；不同模式且 shared 有效 → <code>reuse_available</code>；首次提交直接 queued。</li>
+        <li>只接受与决策匹配的 action：不存在模式只能 <code>create_variant</code>，已存在模式只能 <code>regenerate_variant</code>；错误组合返回 409。</li>
+        <li>新增带 mode 的 status/SSE/cancel/download 路由；完成事件、错误事件均包含 mode。</li>
+        <li>旧无 mode 路由解析顺序：活跃任务 → episode 旧 mode → 最近更新的 done variant；响应增加 deprecation 日志，不影响现有书签。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>不同模式返回 reuse_available 和 reused_stages，不启动线程。</li><li>同模式返回 variant_exists 和正确 download_url。</li><li>确认 action 后只创建一个线程；重复确认受并发锁保护。</li><li>取消 faithful 不触发 podcast cancel_event。</li><li>旧下载接口在只有一个或多个 variant 时按兼容规则返回可预测文件。</li></ul>
+    </article>
+
+    <article class="unit" id="u5">
+      <h3>U5. 提交提示与复用进度体验</h3>
+      <div class="unit-meta">依赖：U4 · 覆盖：R5, R6, R7 · 流程：F2, F3, F5</div>
+      <p><strong>目标：</strong>让不同模式生成与同模式重生成在界面上成为两个语义清晰的操作。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/web/static/index.html</code> — 复用弹窗、duplicate 弹窗、模式状态路由、时间线复用样式</li><li><code>tests/test_web.py</code> — 静态契约和关键文案测试</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>保留同模式弹窗：说明已存在目标模式，按钮为“下载已有”和“重新生成此模式”。</li>
+        <li>新增 reuse_available 弹窗：说明“已找到该视频的源素材，将复用下载、转写、清洗”；主按钮为“生成精华浓缩版”等具体模式，次按钮取消。</li>
+        <li>确认后发送对应 action；会话存储同时保存 videoId 和 mode，刷新恢复调用模式状态路径。</li>
+        <li>时间线支持 reused 状态：绿色完成节点，元信息显示“复用缓存”，持续时间不伪造为本次耗时。</li>
+        <li>结果页下载、新任务返回和错误重试均保留/传递当前 mode。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>新模式提示文案不含“重新生成”，且明确列出三项复用阶段。</li><li>同模式弹窗下载 URL 含 mode；重生成 action 正确。</li><li>刷新处理中页面后恢复到相同模式任务，不显示另一个模式状态。</li><li>复用阶段显示“复用缓存”，翻译/TTS 继续显示真实进度。</li></ul>
+    </article>
+
+    <article class="unit" id="u6">
+      <h3>U6. 历史聚合、模式下载与安全删除</h3>
+      <div class="unit-meta">依赖：U1, U4 · 覆盖：R8, R9, R12 · 流程：F4</div>
+      <p><strong>目标：</strong>把历史抽屉从“一视频一模式”升级为“一视频多变体”。</p>
+      <h4>文件</h4>
+      <ul><li><code>src/storage/db.py</code> — episode + variants 聚合查询</li><li><code>src/web/server.py</code> — variants[]、Part 检测、模式删除</li><li><code>src/web/static/index.html</code> — 分组展示、独立下载/删除</li><li><code>tests/test_web.py</code> — 历史响应和删除安全测试</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li><code>GET /api/tasks</code> 返回视频级元数据和 <code>variants[]</code>；Part 扫描限制在 variant_dir，legacy 变体使用已登记 audio path 所在目录。</li>
+        <li>前端每个视频行展示已有模式徽标，展开后每个变体独立显示状态、时间、下载与删除。</li>
+        <li>模式删除：拒绝活跃任务；新 variant_dir 校验必须位于 <code>data_dir/variants</code> 后才可递归删除；legacy 变体只删 DB 行。</li>
+        <li>整视频删除使用更强确认文案，明确会影响全部模式；先拒绝任一活跃 variant，再按既有安全策略清理。</li>
+      </ol>
+      <h4>测试场景</h4>
+      <ul><li>一个 episode 返回三个 variants，顺序稳定，Part 归属正确。</li><li>删除 condensed 不影响 faithful/podcast DB 行和文件。</li><li>路径逃逸或不在 variants 根下时拒绝递归删除。</li><li>legacy variant 删除后重启不会被迁移重新创建。</li></ul>
+    </article>
+
+    <article class="unit" id="u7">
+      <h3>U7. 兼容收口与端到端验证</h3>
+      <div class="unit-meta">依赖：U1–U6 · 覆盖：全部需求 · 执行边界：不删除旧列</div>
+      <p><strong>目标：</strong>证明新旧数据、三种模式和所有恢复路径可用，再允许后续清理旧字段。</p>
+      <h4>文件</h4>
+      <ul><li><code>tests/test_storage.py</code>、<code>tests/test_pipeline.py</code>、<code>tests/test_web.py</code> — 完整回归</li><li><code>docs/plans/DOD_STATUS.md</code> — 实施阶段按仓库惯例更新完成证据（不在本规划阶段修改）</li></ul>
+      <h4>实施步骤</h4>
+      <ol>
+        <li>构造旧版 SQLite fixture + 根部文件布局，执行启动迁移和下载验证。</li>
+        <li>构造同视频三模式端到端 mock，断言共享函数只调用一次、输出路径和内容分别对应模式。</li>
+        <li>验证 SSE 与轮询在刷新、短暂断线、取消和失败恢复场景中的 mode 一致性。</li>
+        <li>手工在本地 UI 完成首次模式、新模式复用、同模式重生成、历史下载和单模式删除。</li>
+        <li>保留 episode 旧列和兼容路由；至少一个稳定发布周期后另开清理计划。</li>
+      </ol>
+    </article>
+
+    <h3>依赖顺序</h3>
+    <pre><code>U1 数据模型
+ ├── U2 路径与状态
+ │    └── U3 流水线
+ │          └── U4 API 与任务状态
+ │                ├── U5 提交与进度 UI
+ │                └── U6 历史与删除
+ └────────────────────────────────┘
+                         └── U7 兼容与端到端验证</code></pre>
+  </section>
+
+  <section class="section" id="verification-contract">
+    <h2>Verification Contract</h2>
+    <p>本计划仅定义验证方式，当前规划阶段不执行测试。实施时使用仓库指定的 Python 3.11 <code>.venv</code>。</p>
+
+    <h3>自动化命令</h3>
+    <pre><code>source .venv/bin/activate
+python3 -m pytest tests/test_storage.py -q
+python3 -m pytest tests/test_pipeline.py tests/test_web.py -q
+python3 -m pytest tests/ -q</code></pre>
+
+    <h3>质量门禁</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>门禁</th><th>通过条件</th></tr></thead>
+        <tbody>
+          <tr id="ae1"><td class="id">AE1.</td><td>迁移幂等</td><td>旧 DB 连续初始化两次，variant 数量和路径一致；删除过的回填变体不复活。</td></tr>
+          <tr id="ae2"><td class="id">AE2.</td><td>共享阶段只执行一次</td><td>同视频依次生成三模式，extract/transcribe/clean 各最多一次。</td></tr>
+          <tr id="ae3"><td class="id">AE3.</td><td>变体隔离</td><td>重生成任一模式后，其他模式文件 hash、mtime、DB 状态不变。</td></tr>
+          <tr id="ae4"><td class="id">AE4.</td><td>输出真实不同</td><td>mock 模式提示词产生的三份 script/MP3 输入链路均不同，下载映射不串线。</td></tr>
+          <tr id="ae5"><td class="id">AE5.</td><td>状态一致</td><td>提交响应、SSE、轮询、结果页和历史记录始终返回同一 video_id + mode。</td></tr>
+          <tr id="ae6"><td class="id">AE6.</td><td>旧数据可用</td><td>旧根部 MP3 在升级后仍可通过旧接口和新模式接口下载。</td></tr>
+          <tr id="ae7"><td class="id">AE7.</td><td>全量回归</td><td><code>python3 -m pytest tests/ -q</code> 全绿，现有 TTS 进度、刷新恢复和连接重试测试不退化。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>手工验收矩阵</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>场景</th><th>操作</th><th>预期</th></tr></thead>
+        <tbody>
+          <tr><td>首次 faithful</td><td>提交新视频</td><td>六阶段完整执行，生成 faithful 文件。</td></tr>
+          <tr><td>新增 podcast</td><td>相同 URL 选 podcast</td><td>提示复用三阶段；确认后从翻译开始；两份 MP3 共存。</td></tr>
+          <tr><td>新增 condensed</td><td>相同 URL 选 condensed</td><td>同上；历史显示三个模式。</td></tr>
+          <tr><td>重生成 faithful</td><td>再次提交 faithful</td><td>下载已有/重新生成二选一；只替换 faithful。</td></tr>
+          <tr><td>刷新恢复</td><td>podcast TTS 中刷新</td><td>恢复 podcast 时间线和精确 TTS 进度。</td></tr>
+          <tr><td>缓存损坏</td><td>移走 transcript 后提交新模式</td><td>不显示完全复用；从缺失共享阶段恢复。</td></tr>
+          <tr><td>单模式删除</td><td>删除 condensed</td><td>faithful/podcast 仍可下载，共享源保留。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>部署与回滚</h3>
+    <ol>
+      <li>升级前复制 SQLite 文件；无需复制全部媒体文件，因为迁移不移动它们。</li>
+      <li>先部署数据库/兼容读取，再启用新 UI；单体应用可一次发布，但实现提交按 U1→U7 顺序保持可回滚。</li>
+      <li>若新流程故障，回滚应用代码仍可读取原 episode 字段；新增表保留不影响旧代码。</li>
+      <li>不得通过删除 <code>episode_variant</code> 回滚用户新生成的模式文件；恢复时优先修复代码并保留数据。</li>
+    </ol>
+  </section>
+
+  <section class="section" id="definition-of-done">
+    <h2>Definition of Done</h2>
+    <ul class="checklist">
+      <li>R1–R12 与 A1–A4 均有对应自动化或手工验收证据。</li>
+      <li>数据库迁移在真实旧版 fixture 上验证幂等、无文件移动、无路径丢失。</li>
+      <li>同视频三模式生成只执行一次共享阶段，三份 MP3 永久共存且下载正确。</li>
+      <li>不同模式提示使用“复用缓存并生成”语义，同模式提示使用“下载已有 / 重新生成”语义。</li>
+      <li>重生成、失败、取消、删除均不会修改其他模式或有效共享资产。</li>
+      <li>SSE、轮询、刷新恢复、结果页、历史抽屉都按 video_id + mode 工作。</li>
+      <li>旧下载和状态接口在兼容规则下继续工作，并记录弃用日志。</li>
+      <li>全量测试通过，手工验收矩阵完成，未引入新的未解决阻塞项。</li>
+      <li>旧 episode 模式字段未在本次删除；后续清理作为独立计划。</li>
+    </ul>
+  </section>
+
+  <section class="section" id="appendix">
+    <h2>Appendix</h2>
+    <h3>开放问题</h3>
+    <ul>
+      <li><strong>Deferred：</strong>共享源就绪后是否允许同视频多个模式并发生成。当前按已确认范围串行，待观察 API 限流和任务体验后再评估。</li>
+      <li><strong>Deferred：</strong>是否将音色、LLM/TTS 模型纳入版本键。当前唯一键严格只包含 mode。</li>
+      <li><strong>Deferred：</strong>何时移除 episode 的旧 mode/script/audio 列和旧无 mode 接口。至少等待一个稳定发布周期。</li>
+    </ul>
+
+    <h3>研究说明</h3>
+    <p>本计划基于当前仓库代码、既有 PRD、战略文档和最近提交历史。外部研究未采用：方案使用项目既有 SQLite、FastAPI、vanilla JS 模式，且迁移是增量建表与事务回填，没有引入新的外部技术选型；外部资料不会改变本计划的核心架构。</p>
+
+    <h3>Sources &amp; Research</h3>
+    <ul>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/docs/prds/multi-mode-audio-variants-v1.0-prd.html">docs/prds/multi-mode-audio-variants-v1.0-prd.html</a> — 产品需求来源</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/STRATEGY.md">STRATEGY.md</a> — 产品策略与指标</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/src/storage/db.py">src/storage/db.py</a> — 当前 schema 与存储模式</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/src/pipeline/orchestrator.py">src/pipeline/orchestrator.py</a> — 当前共享/模式阶段耦合与清理逻辑</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/src/pipeline/state.py">src/pipeline/state.py</a> — 当前文件状态推断</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/src/web/server.py">src/web/server.py</a> — 当前 API、SSE、状态和下载路由</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/src/web/static/index.html">src/web/static/index.html</a> — 当前重复弹窗和历史抽屉</li>
+      <li><a href="https://github.com/allin2/video2listener/blob/main/tests/test_pipeline.py">tests/test_pipeline.py</a> 与 <a href="https://github.com/allin2/video2listener/blob/main/tests/test_web.py">tests/test_web.py</a> — 现有回归测试模式</li>
+    </ul>
+  </section>
+
+  <footer class="composition-signal">Composed 2026-07-03T10:28:43+08:00 by ce-plan from <code>docs/prds/multi-mode-audio-variants-v1.0-prd.html</code> and confirmed user scope.</footer>
+</main>
+</body>
+</html>

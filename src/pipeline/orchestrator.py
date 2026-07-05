@@ -1,21 +1,36 @@
 """管道编排器。协调完整的 YouTube → MP3 处理流程。"""
 
+import asyncio
 import json
 import logging
+import os
+import shutil
 import threading
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
 from src.config import get_config
 from src.storage import db
-from src.pipeline.state import TaskStatus, check_stage_file
+from src.pipeline.state import (
+    TaskStatus,
+    check_shared_stage_file,
+    check_variant_stage_file,
+)
 from src.youtube.extractor import extract as youtube_extract, check_connectivity
 from src.transcription.cleaner import clean as clean_text
 from src.transcription.transcriber import transcribe as whisper_transcribe
-from src.translation.client import translate as llm_translate, summarize as llm_summarize, _extract_terms, _quality_check
+from src.translation.client import (
+    translate as llm_translate,
+    translate_async as llm_translate_async,
+    summarize as llm_summarize,
+    _extract_terms,
+    _quality_check,
+    _validate_translation_output,
+)
 from src.tts.cleaner import clean_for_tts
-from src.tts.synthesizer import synthesize
-from src.audio.merger import merge
+from src.tts.synthesizer import synthesize, synthesize_async
+from src.audio.merger import merge, merge_async
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +82,102 @@ def _resolve_title(video_id: str, data_dir: Path) -> str:
         return video_id  # 兜底
 
 
+def _existing_stage_paths(data_dir: Path) -> dict[str, str]:
+    """从磁盘恢复数据库中可能缺失的共享阶段文件路径。"""
+    candidates = {
+        "metadata_path": data_dir / "metadata.json",
+        "captions_path": data_dir / "captions_en.json",
+        "transcript_clean_path": data_dir / "transcript_clean.txt",
+    }
+    recovered = {
+        key: str(path)
+        for key, path in candidates.items()
+        if path.is_file() and path.stat().st_size > 0
+    }
+    return recovered
+
+
+def _variant_dir(data_dir: Path, mode: str) -> Path:
+    """返回模式专属目录，拒绝未知模式。"""
+    if mode not in db.VALID_MODES:
+        raise ValueError(f"不支持的模式: {mode}")
+    return data_dir / "variants" / mode
+
+
+def _cleanup_variant_outputs(variant_dir: Path, resume_from: Optional[str] = None) -> None:
+    """只清理目标模式产物；绝不扫描共享目录或其他模式。"""
+    import shutil
+
+    if not variant_dir.is_dir():
+        return
+    keep_translation = resume_from == "translated"
+    for path in list(variant_dir.iterdir()):
+        if keep_translation and path.name in (
+            "script_zh.txt", "summary.json", "translation_audit.json",
+        ):
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def _new_variant_workspace(target_dir: Path) -> Path:
+    """为同模式重新生成创建隔离工作区，避免半成品覆盖已完成产物。"""
+    workspace = target_dir.parent / f".{target_dir.name}.regenerating-{uuid.uuid4().hex}"
+    workspace.mkdir(parents=True, exist_ok=False)
+    return workspace
+
+
+def _commit_variant_workspace(workspace: Path, target_dir: Path) -> None:
+    """原子切换同模式目录；切换失败时恢复旧目录。"""
+    backup = target_dir.parent / f".{target_dir.name}.backup-{uuid.uuid4().hex}"
+    moved_old = False
+    try:
+        if target_dir.exists():
+            os.replace(target_dir, backup)
+            moved_old = True
+        os.replace(workspace, target_dir)
+    except Exception:
+        if moved_old and backup.exists() and not target_dir.exists():
+            os.replace(backup, target_dir)
+        raise
+    finally:
+        if backup.exists() and target_dir.exists():
+            shutil.rmtree(backup)
+
+
+def _discard_variant_workspace(workspace: Optional[Path], target_dir: Path) -> None:
+    if workspace and workspace != target_dir and workspace.exists():
+        shutil.rmtree(workspace)
+
+
+def _path_in_committed_workspace(path: Optional[Path], workspace: Path, target_dir: Path) -> Optional[Path]:
+    if path is None:
+        return None
+    return target_dir / path.relative_to(workspace)
+
+
+def _ensure_distinct_mode_script(video_id: str, mode: str, script: str) -> None:
+    """拒绝把另一个模式的相同脚本再次注册为新模式。"""
+    normalised = "".join(script.split())
+    for variant in db.list_variants(video_id):
+        if variant.get("mode") == mode:
+            continue
+        path_value = variant.get("script_zh_path")
+        if not path_value:
+            continue
+        path = Path(path_value)
+        if not path.is_file():
+            continue
+        other = "".join(path.read_text(encoding="utf-8").split())
+        if normalised and normalised == other:
+            raise RuntimeError(
+                f"{mode} 模式生成内容与已有 {variant.get('mode')} 模式完全相同；"
+                "已停止 TTS，请重新生成该模式。"
+            )
+
+
 # 用于并发控制的活跃任务集合
 _active_tasks: set[str] = set()
 _lock = threading.Lock()
@@ -82,56 +193,44 @@ def process(
     cancel_event=None,
     resume_from: Optional[str] = None,
 ) -> dict:
-    """执行完整的处理管道。
+    """同步兼容包装——内部调用 asyncio.run。"""
+    return asyncio.run(_process_async(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event, resume_from))
 
-    Args:
-        video_id: YouTube video_id 或 URL
-        mode: 输出模式 (faithful | podcast | condensed)
-        force: 是否强制重新处理
-        on_progress: 进度回调 (message: str)
-        llm_config: 动态 LLM 配置
-        tts_config: 动态 TTS 配置
-        cancel_event: threading.Event 取消信号
-        resume_from: 从指定阶段恢复 (text_ready | translated | tts_done)
 
-    Returns:
-        {"status": "done"|"failed"|"cancelled", "video_id": str, "output_path": str|None, "message": str}
-    """
-    # 并发防护
+async def _process_async(
+    video_id: str,
+    mode: str = "podcast",
+    force: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
+    llm_config: Optional[dict] = None,
+    tts_config: Optional[dict] = None,
+    cancel_event=None,
+    resume_from: Optional[str] = None,
+) -> dict:
+    """异步执行完整的处理管道。"""
     with _lock:
         if video_id in _active_tasks:
             return {"status": "failed", "video_id": video_id, "output_path": None, "message": "该视频正在处理中"}
         _active_tasks.add(video_id)
 
     try:
-        return _process_impl(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event, resume_from)
+        return await _process_impl(video_id, mode, force, on_progress, llm_config, tts_config, cancel_event, resume_from)
     finally:
         with _lock:
             _active_tasks.discard(video_id)
 
 
 def _check_cancel(cancel_event, progress) -> bool:
-    """检查取消信号。返回 True 表示已取消。"""
+    """检查取消信号。返回 True 表示已取消。
+    支持 threading.Event 和 asyncio.Event。
+    """
     if cancel_event and cancel_event.is_set():
         progress("⏹ 用户取消，正在清理...")
         return True
     return False
 
 
-def _cleanup_post_translation(data_dir: Path):
-    """删除翻译阶段之后的产物，保留下载 + 转写 + 清洗结果。"""
-    import shutil
-    for f in list(data_dir.glob("*")):
-        name = f.name
-        if name in ("script_zh.txt", "summary.json", "tts_text.txt", "_concat_list.txt"):
-            f.unlink()
-        elif name.endswith(".mp3"):
-            f.unlink()
-        elif name == "tts_segments" and f.is_dir():
-            shutil.rmtree(f)
-
-
-def _process_impl(
+async def _process_impl(
     video_id: str,
     mode: str,
     force: bool,
@@ -160,21 +259,16 @@ def _process_impl(
     # 确保数据库已初始化
     db.init_db()
 
-    # --- 连通性预检 ---
-    ok, detail = check_connectivity()
-    if not ok:
-        progress(f"❌ 网络不通: {detail}")
-        return {"status": "failed", "video_id": video_id, "output_path": None, "message": detail}
-
-    # --- 重复检测 ---
+    # --- 指定模式重复检测 ---
     if not force:
-        existing = db.is_duplicate(video_id)
-        if existing:
-            output_path = existing.get("audio_zh_path", "")
-            progress("已存在完成记录，跳过处理")
+        existing_variant = db.get_completed_variant(video_id, mode)
+        if existing_variant:
+            output_path = existing_variant.get("audio_zh_path", "")
+            progress(f"已存在完成的 {mode} 模式，跳过处理")
             return {
                 "status": "done",
                 "video_id": video_id,
+                "mode": mode,
                 "output_path": output_path,
                 "message": "已缓存，跳过处理",
             }
@@ -211,26 +305,9 @@ def _process_impl(
             except OSError:
                 data_dir = tmp_dir
 
-    # force 模式：只清理翻译阶段之后的产物，保留下载 + 转写
-    if force and data_dir.exists():
-        import shutil
-        for f in list(data_dir.glob("*")):
-            name = f.name
-            if name in ("script_zh.txt", "summary.json", "tts_text.txt", "_concat_list.txt"):
-                f.unlink()
-            elif name.endswith(".mp3"):
-                f.unlink()
-            elif name == "tts_segments" and f.is_dir():
-                shutil.rmtree(f)
-        # 重置 DB 状态为翻译前
-        episode = db.get_episode(video_id)
-        if episode:
-            db.update_status(video_id, "text_ready",
-                script_zh_path=None, summary_path=None, audio_zh_path=None, error_message=None)
-
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- 初始化或加载记录 ---
+    # --- 初始化或加载共享记录 ---
     episode = db.get_episode(video_id)
     if episode is None:
         db.create_episode(
@@ -239,35 +316,135 @@ def _process_impl(
             mode=mode,
             data_dir=str(data_dir),
         )
-        current_status = TaskStatus.NEW
+        episode = db.get_episode(video_id)
     else:
-        # 从文件系统推断当前状态
-        current_status = TaskStatus.NEW
-        for status in reversed([s for s in TaskStatus if s not in (TaskStatus.NEW, TaskStatus.FAILED, TaskStatus.DONE, TaskStatus.CANCELLED)]):
-            if check_stage_file(data_dir, status):
-                current_status = status
-                break
+        # 服务重启或旧版本可能只留下磁盘文件、没有保存对应 DB 路径。
+        # 在判断恢复阶段前补齐路径，确保强制重新生成可以复用已有转写。
+        recovered_paths = _existing_stage_paths(data_dir)
+        missing_paths = {
+            key: value for key, value in recovered_paths.items() if not episode.get(key)
+        }
+        if missing_paths:
+            db.update_status(video_id, episode.get("status", TaskStatus.NEW.value), **missing_paths)
+            episode = db.get_episode(video_id)
 
-        # resume_from 覆盖检测到的状态（从失败阶段恢复）
-        if resume_from and resume_from in _RESUME_MAP:
-            resume_status = _RESUME_MAP[resume_from]
-            progress(f"从阶段恢复: {resume_from} ({resume_status.value})")
-            current_status = resume_status
-            # 清除失败的 DB 记录
-            db.update_status(video_id, resume_status.value, error_message=None)
+    shared_status = TaskStatus.NEW
+    if check_shared_stage_file(data_dir, TaskStatus.TEXT_READY):
+        shared_status = TaskStatus.TEXT_READY
+    elif check_shared_stage_file(data_dir, TaskStatus.METADATA_FETCHED):
+        shared_status = TaskStatus.METADATA_FETCHED
+
+    final_target_dir = _variant_dir(data_dir, mode)
+    existing_variant = db.get_variant(video_id, mode)
+    atomic_regeneration = bool(force and existing_variant is not None)
+    target_dir = final_target_dir
+
+    # 强制重生成只触碰目标模式。仅明确从 metadata 恢复时才使共享清洗失效。
+    if force and not atomic_regeneration:
+        _cleanup_variant_outputs(target_dir, resume_from=resume_from)
+    if force:
+        if resume_from == "metadata_fetched":
+            clean_path = data_dir / "transcript_clean.txt"
+            if clean_path.exists():
+                clean_path.unlink()
+            db.update_status(
+                video_id, TaskStatus.METADATA_FETCHED.value,
+                transcript_clean_path=None, error_message=None,
+            )
+            shared_status = TaskStatus.METADATA_FETCHED
+
+    if atomic_regeneration:
+        target_dir = _new_variant_workspace(final_target_dir)
+        # “从 TTS 重试”需要把已验证译文复制进隔离工作区，其余重新生成均从空目录开始。
+        if resume_from == "translated":
+            for name in ("script_zh.txt", "summary.json", "translation_audit.json"):
+                source = final_target_dir / name
+                if source.is_file():
+                    shutil.copy2(source, target_dir / name)
+    else:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        variant_updates = {"variant_dir": str(final_target_dir)}
+        if force and resume_from != "translated":
+            variant_updates.update({
+                "script_zh_path": None,
+                "summary_path": None,
+                "tts_text_path": None,
+                "tts_segments_dir": None,
+                "audio_zh_path": None,
+                "error_message": None,
+                "audit_status": None,
+                "audit_message": None,
+                "translation_audit_path": None,
+            })
+        elif force:
+            variant_updates.update({
+                "tts_text_path": None,
+                "tts_segments_dir": None,
+                "audio_zh_path": None,
+                "error_message": None,
+            })
+        db.upsert_variant(
+            video_id,
+            mode,
+            status="new" if force or existing_variant is None else existing_variant["status"],
+            **variant_updates,
+        )
+    variant = db.get_variant(video_id, mode)
+
+    variant_status = TaskStatus.NEW
+    if check_variant_stage_file(target_dir, TaskStatus.TTS_DONE):
+        variant_status = TaskStatus.TTS_DONE
+    elif check_variant_stage_file(target_dir, TaskStatus.TRANSLATED):
+        variant_status = TaskStatus.TRANSLATED
+    elif not force and variant:
+        script_value = variant.get("script_zh_path")
+        script_path = Path(script_value) if script_value else None
+        if script_path and script_path.is_file() and script_path.stat().st_size > 0:
+            variant_status = TaskStatus.TRANSLATED
+
+    if resume_from and resume_from in _RESUME_MAP:
+        resume_status = _RESUME_MAP[resume_from]
+        if atomic_regeneration and resume_status == TaskStatus.TRANSLATED:
+            script = target_dir / "script_zh.txt"
+            if not script.is_file() or script.stat().st_size <= 0:
+                resume_status = TaskStatus.NEW
+        progress(f"从阶段恢复: {resume_from} ({resume_status.value})")
+        if resume_status in (TaskStatus.METADATA_FETCHED, TaskStatus.TEXT_READY):
+            shared_status = resume_status
+        else:
+            variant_status = resume_status
+
+    if shared_status == TaskStatus.TEXT_READY:
+        progress("♻️ 复用缓存：下载")
+        progress("♻️ 复用缓存：转写")
+        progress("♻️ 复用缓存：清洗")
+
+    deferred_summary = None
+    audit_status = (
+        variant.get("audit_status") if mode == "faithful" and variant else "not_applicable"
+    ) or ("pending" if mode == "faithful" else "not_applicable")
+    audit_message = variant.get("audit_message", "") if variant else ""
+    existing_audit_path = target_dir / "translation_audit.json"
+    audit_path: Optional[Path] = existing_audit_path if existing_audit_path.is_file() else None
 
     try:
         # --- Cancel check before metadata ---
         if _check_cancel(cancel_event, progress):
-            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
-            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+            _discard_variant_workspace(target_dir, final_target_dir)
+            if not atomic_regeneration:
+                db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                     "message": "用户取消", "resumable_from": "new"}
 
         # --- Stage: metadata ---
-        if _should_run(current_status, TaskStatus.METADATA_FETCHED):
+        if _should_run(shared_status, TaskStatus.METADATA_FETCHED):
+            ok, detail = check_connectivity()
+            if not ok:
+                progress(f"❌ 网络不通: {detail}")
+                raise RuntimeError(detail)
             progress("获取视频信息...")
             try:
-                result = youtube_extract(video_id, data_dir)
+                result = await asyncio.to_thread(youtube_extract, video_id, data_dir)
                 db.update_status(
                     video_id,
                     TaskStatus.METADATA_FETCHED.value,
@@ -277,7 +454,7 @@ def _process_impl(
                     publish_date=result.meta.publish_date,
                     metadata_path=str(data_dir / "metadata.json"),
                 )
-                current_status = TaskStatus.METADATA_FETCHED
+                shared_status = TaskStatus.METADATA_FETCHED
                 progress(f"视频: {result.meta.title} ({result.meta.duration_seconds // 60} 分钟)")
             except Exception as e:
                 progress(f"获取视频信息失败: {e}")
@@ -285,12 +462,14 @@ def _process_impl(
 
         # --- Cancel check before text ---
         if _check_cancel(cancel_event, progress):
-            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
-            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+            _discard_variant_workspace(target_dir, final_target_dir)
+            if not atomic_regeneration:
+                db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
+            return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                     "message": "用户取消", "resumable_from": "metadata_fetched"}
 
         # --- Stage: text ---
-        if _should_run(current_status, TaskStatus.TEXT_READY):
+        if _should_run(shared_status, TaskStatus.TEXT_READY):
             episode = db.get_episode(video_id)
             captions_path_value = episode.get("captions_path") if episode else None
             captions_file = Path(captions_path_value) if captions_path_value else None
@@ -307,7 +486,7 @@ def _process_impl(
                 audio_files = list(data_dir.glob("*.wav")) + list(data_dir.glob("*.m4a"))
                 if audio_files:
                     progress("开始语音转写...")
-                    captions = whisper_transcribe(audio_files[0], data_dir)
+                    captions = await asyncio.to_thread(whisper_transcribe, audio_files[0], data_dir)
                     raw_text = "\n".join(c.get("text", "") for c in captions)
                     captions_path = str(data_dir / "captions_en.json")
                     db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
@@ -316,13 +495,13 @@ def _process_impl(
                     # 尝试重新提取
                     progress("开始语音转写...")
                     progress("重新获取字幕...")
-                    result = youtube_extract(video_id, data_dir)
+                    result = await asyncio.to_thread(youtube_extract, video_id, data_dir)
                     if result.subtitles:
                         raw_text = "\n".join(s.text for s in result.subtitles)
                         progress("转写完成")
                     elif result.audio_path:
                         progress("无字幕，开始语音转写...")
-                        captions = whisper_transcribe(result.audio_path, data_dir)
+                        captions = await asyncio.to_thread(whisper_transcribe, result.audio_path, data_dir)
                         raw_text = "\n".join(c.get("text", "") for c in captions)
                         captions_path = str(data_dir / "captions_en.json")
                         db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
@@ -339,17 +518,21 @@ def _process_impl(
                 TaskStatus.TEXT_READY.value,
                 transcript_clean_path=str(clean_path),
             )
-            current_status = TaskStatus.TEXT_READY
+            shared_status = TaskStatus.TEXT_READY
             progress(f"文本清洗完成 ({len(cleaned)} 字符)")
 
         # --- Cancel check before translation ---
         if _check_cancel(cancel_event, progress):
-            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
-            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+            _discard_variant_workspace(target_dir, final_target_dir)
+            if not atomic_regeneration:
+                db.update_variant_status(
+                    video_id, mode, TaskStatus.CANCELLED.value, error_message="用户取消"
+                )
+            return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                     "message": "用户取消", "resumable_from": "text_ready"}
 
         # --- Stage: translate ---
-        if _should_run(current_status, TaskStatus.TRANSLATED):
+        if _should_run(variant_status, TaskStatus.TRANSLATED):
             episode = db.get_episode(video_id)
             clean_text_content = Path(episode["transcript_clean_path"]).read_text(encoding="utf-8")
 
@@ -359,75 +542,137 @@ def _process_impl(
             }
 
             progress(f"开始翻译（模式: {mode}）...")
-            script_zh = llm_translate(clean_text_content, mode, metadata, on_progress=progress, llm_config=llm_config)
-            script_path = data_dir / "script_zh.txt"
-            script_path.write_text(script_zh, encoding="utf-8")
-
-            # 从译文中提取术语，写入 glossary
-            try:
-                _extract_terms(str(script_path))
-            except Exception as e:
-                logger.warning("术语提取失败（非致命）: %s", e)
-
-            # 翻译质量自检（非阻塞）
-            try:
-                transcript_clean_path = episode.get("transcript_clean_path", "")
-                if transcript_clean_path:
-                    source_text = Path(transcript_clean_path).read_text(encoding="utf-8")
-                    verdict = _quality_check(source_text, script_zh, metadata, llm_config=llm_config)
-                    if verdict:
-                        logger.info(
-                            "质量检查结果: %d/%d 项通过", verdict["passed"], verdict["total"]
-                        )
-            except Exception as e:
-                logger.warning("质量检查失败（非致命）: %s", e)
-
-            progress("生成摘要...")
-            try:
-                summary = llm_summarize(script_zh, metadata, llm_config=llm_config)
-            except Exception:
-                summary = {"title_zh": metadata.get("title", ""), "summary": "", "key_points": []}
-
-            summary_path = data_dir / "summary.json"
-            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-
-            db.update_status(
-                video_id,
-                TaskStatus.TRANSLATED.value,
-                script_zh_path=str(script_path),
-                summary_path=str(summary_path),
+            translation_audit: dict = {}
+            script_zh = await llm_translate_async(
+                clean_text_content,
+                mode,
+                metadata,
+                on_progress=progress,
+                llm_config=llm_config,
+                cancel_event=cancel_event,
+                on_audit=translation_audit.update,
             )
-            current_status = TaskStatus.TRANSLATED
+            _validate_translation_output(clean_text_content, script_zh, mode)
+            _ensure_distinct_mode_script(video_id, mode, script_zh)
+            script_path = target_dir / "script_zh.txt"
+            script_path.write_text(script_zh, encoding="utf-8")
+            audit_path = target_dir / "translation_audit.json"
+            audit_path.write_text(
+                json.dumps(translation_audit, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            audit_status = translation_audit.get(
+                "quality_status", "not_applicable" if mode != "faithful" else "passed"
+            )
+            semantic_audit = translation_audit.get("semantic_audit") or {}
+            technical_reasons = [
+                item.get("technical_error", "")
+                for item in semantic_audit.get("segments", [])
+                if item.get("status") == "technical_unavailable"
+            ]
+            audit_message = (
+                "质量审计降级：" + "; ".join(filter(None, technical_reasons))[:240]
+                if audit_status == "degraded" else ""
+            )
+            _cleanup_variant_outputs(target_dir, resume_from="translated")
+
+            # 标记翻译完成，管道即刻进入下一阶段
+            if not atomic_regeneration:
+                db.update_variant_status(
+                    video_id,
+                    mode,
+                    TaskStatus.TRANSLATED.value,
+                    script_zh_path=str(script_path),
+                    audit_status=audit_status,
+                    audit_message=audit_message,
+                    translation_audit_path=str(audit_path),
+                )
+            variant_status = TaskStatus.TRANSLATED
             progress("翻译完成")
+
+            # 后台异步：术语提取、质量自检、摘要生成（不阻塞管道）
+            def _post_translate_async(summary_script_path: Path, summary_dir: Path):
+                try:
+                    _extract_terms(str(summary_script_path))
+                except Exception as e:
+                    logger.warning("术语提取失败（非致命）: %s", e)
+
+                try:
+                    transcript_clean_path = episode.get("transcript_clean_path", "")
+                    if transcript_clean_path:
+                        source_text = Path(transcript_clean_path).read_text(encoding="utf-8")
+                        verdict = _quality_check(source_text, script_zh, metadata, llm_config=llm_config)
+                        if verdict:
+                            logger.info("质量检查结果: %d/%d 项通过", verdict["passed"], verdict["total"])
+                except Exception as e:
+                    logger.warning("质量检查失败（非致命）: %s", e)
+
+                try:
+                    summary = llm_summarize(script_zh, metadata, llm_config=llm_config)
+                except Exception:
+                    summary = {"title_zh": metadata.get("title", ""), "summary": "", "key_points": []}
+                    logger.warning("摘要生成失败，使用空摘要")
+
+                summary_path = summary_dir / "summary.json"
+                summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+                db.update_variant_artifacts(
+                    video_id, mode,
+                    summary_path=str(summary_path),
+                )
+                logger.info("后台摘要已写入: %s", summary_path)
+
+            if atomic_regeneration:
+                deferred_summary = (script_zh, metadata, _post_translate_async)
+            else:
+                threading.Thread(
+                    target=_post_translate_async,
+                    args=(script_path, target_dir),
+                    daemon=True,
+                ).start()
 
         # --- Cancel check before TTS ---
         if _check_cancel(cancel_event, progress):
-            _cleanup_post_translation(data_dir)
-            db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
-            return {"status": "cancelled", "video_id": video_id, "output_path": None,
+            _cleanup_variant_outputs(target_dir, resume_from="translated")
+            _discard_variant_workspace(target_dir, final_target_dir)
+            if not atomic_regeneration:
+                db.update_variant_status(
+                    video_id, mode, TaskStatus.CANCELLED.value, error_message="用户取消"
+                )
+            return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                     "message": "用户取消", "resumable_from": "translated"}
 
         # --- Stage: TTS ---
-        if _should_run(current_status, TaskStatus.TTS_DONE):
+        if _should_run(variant_status, TaskStatus.TTS_DONE):
+            script_path = target_dir / "script_zh.txt"
+            script_zh = script_path.read_text(encoding="utf-8")
+
             episode = db.get_episode(video_id)
-            script_zh = Path(episode["script_zh_path"]).read_text(encoding="utf-8")
+            source_path = Path(episode["transcript_clean_path"])
+            source_text = source_path.read_text(encoding="utf-8")
+            _validate_translation_output(source_text, script_zh, mode)
+            _ensure_distinct_mode_script(video_id, mode, script_zh)
+            progress("译文质量门禁通过")
 
             progress("TTS 文本清洗...")
             tts_text = clean_for_tts(script_zh)
-            tts_text_path = data_dir / "tts_text.txt"
+            tts_text_path = target_dir / "tts_text.txt"
             tts_text_path.write_text(tts_text, encoding="utf-8")
 
-            tts_dir = data_dir / "tts_segments"
+            tts_dir = target_dir / "tts_segments"
             tts_dir.mkdir(exist_ok=True)
 
             progress("开始语音合成...")
-            segments = synthesize(tts_text, tts_dir, on_progress=progress, tts_config=tts_config)
+            segments = await synthesize_async(tts_text, tts_dir, on_progress=progress, tts_config=tts_config)
 
             # --- Cancel check before merge ---
             if _check_cancel(cancel_event, progress):
-                _cleanup_post_translation(data_dir)
-                db.update_status(video_id, TaskStatus.CANCELLED.value, error_message="用户取消")
-                return {"status": "cancelled", "video_id": video_id, "output_path": None,
+                _cleanup_variant_outputs(target_dir, resume_from="translated")
+                _discard_variant_workspace(target_dir, final_target_dir)
+                if not atomic_regeneration:
+                    db.update_variant_status(
+                        video_id, mode, TaskStatus.CANCELLED.value, error_message="用户取消"
+                    )
+                return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                         "message": "用户取消", "resumable_from": "translated"}
 
             progress(f"合并 {len(segments)} 个音频片段...")
@@ -444,39 +689,98 @@ def _process_impl(
                         raw_title = video_id
                 else:
                     raw_title = video_id
-            output_name = _sanitize_filename(raw_title)
-            output_base = data_dir / output_name
-            output_files = merge(segments, output_base, on_progress=progress)
+            output_name = f"{_sanitize_filename(raw_title)}_{mode}"
+            output_base = target_dir / output_name
+            output_files = await merge_async(segments, output_base, on_progress=progress)
 
-            db.update_status(
-                video_id,
-                TaskStatus.TTS_DONE.value,
-                audio_zh_path=str(output_files[0]) if output_files else None,
-            )
-            current_status = TaskStatus.TTS_DONE
+            if not atomic_regeneration:
+                db.update_variant_status(
+                    video_id,
+                    mode,
+                    TaskStatus.TTS_DONE.value,
+                    tts_text_path=str(tts_text_path),
+                    tts_segments_dir=str(tts_dir),
+                    audio_zh_path=str(output_files[0]) if output_files else None,
+                )
+            variant_status = TaskStatus.TTS_DONE
             progress(f"MP3 已生成: {len(output_files)} 个文件")
 
         # --- Stage: done ---
-        db.update_status(video_id, TaskStatus.DONE.value)
-        episode = db.get_episode(video_id)
-        output_path = episode.get("audio_zh_path", "") if episode else ""
+        if atomic_regeneration:
+            _commit_variant_workspace(target_dir, final_target_dir)
+            committed_script = _path_in_committed_workspace(
+                target_dir / "script_zh.txt", target_dir, final_target_dir,
+            )
+            committed_tts_text = _path_in_committed_workspace(
+                target_dir / "tts_text.txt", target_dir, final_target_dir,
+            )
+            committed_tts_dir = _path_in_committed_workspace(
+                target_dir / "tts_segments", target_dir, final_target_dir,
+            )
+            committed_audio = _path_in_committed_workspace(
+                output_files[0] if output_files else None, target_dir, final_target_dir,
+            )
+            committed_summary = final_target_dir / "summary.json"
+            committed_audit = final_target_dir / "translation_audit.json"
+            db.update_variant_status(
+                video_id,
+                mode,
+                TaskStatus.DONE.value,
+                variant_dir=str(final_target_dir),
+                script_zh_path=str(committed_script),
+                summary_path=str(committed_summary) if committed_summary.is_file() else None,
+                tts_text_path=str(committed_tts_text),
+                tts_segments_dir=str(committed_tts_dir),
+                audio_zh_path=str(committed_audio) if committed_audio else None,
+                audit_status=audit_status,
+                audit_message=audit_message,
+                translation_audit_path=(
+                    str(committed_audit) if committed_audit.is_file() else None
+                ),
+            )
+            if deferred_summary:
+                _, _, summary_worker = deferred_summary
+                threading.Thread(
+                    target=summary_worker,
+                    args=(committed_script, final_target_dir),
+                    daemon=True,
+                ).start()
+        else:
+            db.update_variant_status(
+                video_id, mode, TaskStatus.DONE.value,
+                audit_status=audit_status,
+                audit_message=audit_message,
+                translation_audit_path=str(audit_path) if audit_path else None,
+            )
+        variant = db.get_variant(video_id, mode)
+        output_path = variant.get("audio_zh_path", "") if variant else ""
 
         progress("处理完成！")
         return {
             "status": "done",
             "video_id": video_id,
+            "mode": mode,
             "output_path": output_path,
             "message": "处理完成",
+            "audit_status": audit_status,
+            "audit_message": audit_message,
         }
 
     except Exception as e:
         error_msg = str(e)
         logger.exception("Pipeline failed for %s: %s", video_id, error_msg)
-        db.update_status(video_id, TaskStatus.FAILED.value, error_message=error_msg)
+        _discard_variant_workspace(target_dir, final_target_dir)
+        if shared_status != TaskStatus.TEXT_READY:
+            db.update_status(video_id, TaskStatus.FAILED.value, error_message=error_msg)
+        elif not atomic_regeneration:
+            db.update_variant_status(
+                video_id, mode, TaskStatus.FAILED.value, error_message=error_msg
+            )
         progress(f"处理失败: {error_msg}")
         return {
             "status": "failed",
             "video_id": video_id,
+            "mode": mode,
             "output_path": None,
             "message": error_msg,
         }
