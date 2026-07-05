@@ -16,3 +16,9 @@ source .venv/bin/activate && python3 -m uvicorn src.web.server:app --host 127.0.
 ```bash
 source .venv/bin/activate && python3 -m pytest tests/ -q
 ```
+
+## 知识库
+
+`docs/solutions/` — 已解决问题的文档化记录，按类别组织，带 YAML frontmatter（`module`, `tags`, `problem_type`）。在实现或调试相关模块时可参考。
+
+`CONCEPTS.md` — 项目共享领域词汇表（实体、流程、状态概念）。在理解代码库或讨论领域概念时可参考。
