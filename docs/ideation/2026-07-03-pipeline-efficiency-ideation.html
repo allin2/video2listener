@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ideation: 管道效率优化 — 翻译与 TTS 瓶颈突破</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --surface: #ffffff;
+    --text: #1c1917;
+    --text-muted: #78716c;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --accent-text: #1d4ed8;
+    --border: #e7e5e4;
+    --warn-soft: #fef3c7;
+    --warn-text: #92400e;
+    --success-soft: #dcfce7;
+    --success-text: #166534;
+    --radius: 8px;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 48px 24px 64px;
+  }
+  header {
+    margin-bottom: 40px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 8px;
+  }
+  header .meta {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    font-size: 13px; color: var(--text-muted);
+    margin-top: 12px;
+  }
+  header .meta span {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 10px;
+  }
+  .stats {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    margin-bottom: 40px;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    min-width: 100px;
+  }
+  .stat .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .stat .label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  section {
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .axes {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .axis-chip {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  article.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+  article.card h3 {
+    display: flex; align-items: center; gap: 10px;
+  }
+  article.card h3 .rank {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .card-meta {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    font-size: 12px; color: var(--text-muted);
+    margin: 8px 0 12px;
+  }
+  .card-meta span {
+    background: var(--bg);
+    border-radius: 4px;
+    padding: 2px 8px;
+  }
+  .confidence-high { background: var(--success-soft) !important; color: var(--success-text) !important; }
+  .complexity-low { background: #dcfce7 !important; color: #166534 !important; }
+  .complexity-medium { background: #fef3c7 !important; color: #92400e !important; }
+  .basis-tag {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    background: #f1f5f9;
+    border-radius: 3px;
+    padding: 1px 6px;
+  }
+  table {
+    width: 100%; border-collapse: collapse;
+    font-size: 14px;
+  }
+  th, td {
+    text-align: left; padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-size: 12px; color: var(--text-muted);
+    font-weight: 600; text-transform: uppercase;
+  }
+  td.reason { color: var(--text-muted); font-size: 13px; }
+  footer {
+    margin-top: 48px; padding-top: 16px;
+    border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--text-muted);
+  }
+  .jump-list { margin-bottom: 24px; }
+  .jump-list a { color: var(--accent); text-decoration: none; margin-right: 16px; font-size: 14px; }
+  .jump-list a:hover { text-decoration: underline; }
+  .grounding-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    font-size: 14px;
+  }
+  .grounding-block h4 { font-size: 14px; margin: 12px 0 4px; color: var(--text-muted); }
+  .grounding-block h4:first-child { margin-top: 0; }
+  .grounding-block p { margin-bottom: 8px; }
+  .grounding-block ul { margin: 4px 0 12px 20px; }
+  .grounding-block li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>管道效率优化 — 翻译与 TTS 瓶颈突破</h1>
+  <div class="meta">
+    <span>2026-07-03</span>
+    <span>topic: pipeline-efficiency</span>
+    <span>repo-grounded</span>
+    <span>focus: 减少翻译和TTS阶段的耗时</span>
+  </div>
+</header>
+
+<div class="stats">
+  <div class="stat"><div class="num">46</div><div class="label">原始候选</div></div>
+  <div class="stat"><div class="num">7</div><div class="label">最终入选</div></div>
+  <div class="stat"><div class="num">39</div><div class="label">已淘汰</div></div>
+  <div class="stat"><div class="num">5</div><div class="label">覆盖轴面</div></div>
+</div>
+
+<section>
+  <h2>Topic Axes</h2>
+  <div class="axes">
+    <span class="axis-chip">1. 翻译并发化</span>
+    <span class="axis-chip">2. TTS 并发与引擎</span>
+    <span class="axis-chip">3. 阶段流水线化</span>
+    <span class="axis-chip">4. 超时与重试策略</span>
+    <span class="axis-chip">5. 架构减负</span>
+  </div>
+</section>
+
+<section>
+  <h2>Grounding Context</h2>
+  <div class="grounding-block">
+    <h4>Codebase Context</h4>
+    <p>video2listener — YouTube → 中文 MP3 播客转换器。Pipeline: yt-dlp → whisper → DeepSeek translate → MiMo/Edge TTS → ffmpeg merge。核心瓶颈：翻译阶段串行迭代批次（client.py:394 for 循环），TTS 阶段 ThreadPoolExecutor(3) 内嵌 MiMo 每段又创建 ThreadPoolExecutor(1)（synthesizer.py:198）。翻译和 TTS 完全顺序执行，无重叠。</p>
+
+    <h4>External Research (research value: high)</h4>
+    <p>DeepSeek API 支持 500 并发连接，async dispatch 实测 2x 吞吐（187 vs 92 req/min）。Edge TTS 实测上限 3-5 并发 WebSocket。Producer-consumer 阶段重叠可节省 ~40% 端到端延迟。OpenAI AsyncOpenAI 客户端原生支持非阻塞调用。TCP AIMD 自适应并发是经过验证的分布式系统模式。</p>
+
+    <h4>Past Learnings</h4>
+    <p>TTS 并发（ThreadPoolExecutor 3 workers）已验证可将 TTS 阶段从串行加速 ~3x。翻译批处理（batch_size=5）已减少 API 往返次数。后台守护线程模式（orchestrator.py:488）已验证异步任务不阻塞主路径。</p>
+  </div>
+</section>
+
+<section id="ranked-ideas">
+  <h2>Ranked Ideas</h2>
+  <div class="jump-list">
+    <a href="#idea1">#1 Async Fan-Out</a>
+    <a href="#idea2">#2 Producer-Consumer</a>
+    <a href="#idea3">#3 Remove Nested Executors</a>
+    <a href="#idea4">#4 Adaptive Concurrency</a>
+    <a href="#idea5">#5 Progressive Output</a>
+    <a href="#idea6">#6 Token-Aware Batching</a>
+    <a href="#idea7">#7 Cancel Tokens</a>
+  </div>
+
+  <article class="card" id="idea1">
+    <h3><span class="rank">1</span>Async Translation Fan-Out — 并发 API 调度</h3>
+    <div class="card-meta">
+      <span class="axis-chip">1. 翻译并发化</span>
+      <span class="confidence-high">Confidence 90%</span>
+      <span class="complexity-medium">Complexity Medium</span>
+    </div>
+    <p><strong>Description:</strong> 将 client.py:394 的串行 <code>for batch in batches</code> 替换为 AsyncOpenAI + asyncio.Semaphore(10) 并发调度。所有翻译批次同时发出，通过信号量控制最大并发数。DeepSeek 支持 500 并发连接，当前只用 1。同时将 retry 中的 time.sleep() 改为 asyncio.sleep() 实现非阻塞退避。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> client.py:394 串行 for 循环；client.py:190 time.sleep() 阻塞整线程。<span class="basis-tag">external:</span> DeepSeek 500 并发连接限制；async dispatch 2x 吞吐（Baidu 基准测试 187 vs 92 req/min）。</p>
+    <p><strong>Rationale:</strong> 翻译阶段是最大延迟源（40 段 × 5 批 = 8 次串行 API 调用，每次 ~500ms → 4s 纯等待）。并发化后所有批次同时发出，延迟降至单次 API 调用的延迟（~500ms），4-6x 加速。这是所有方案中影响最大的单项改动。</p>
+    <p><strong>Downsides:</strong> 需要从同步 OpenAI 切换到 AsyncOpenAI；需测试 DeepSeek 免费 tier 的 RPM 限制；高并发下需配合 rate limiter（见 #4）避免 429 风暴。</p>
+  </article>
+
+  <article class="card" id="idea2">
+    <h3><span class="rank">2</span>Producer-Consumer Pipeline — 翻译与 TTS 阶段重叠</h3>
+    <div class="card-meta">
+      <span class="axis-chip">3. 阶段流水线化</span>
+      <span class="confidence-high">Confidence 85%</span>
+      <span class="complexity-medium">Complexity Medium</span>
+    </div>
+    <p><strong>Description:</strong> 在 orchestrator.py:441-513 的翻译 → TTS 边界引入 asyncio.Queue（maxsize=8）。翻译每完成一批即入队，TTS worker 池从队列拉取并开始合成。两个阶段重叠执行——TTS 不再等翻译全部完成。类似丰田 Kanban 系统：下游拉取，上游不堆积。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> orchestrator.py:500 _should_run(TTS_DONE) 强制 TTS 等待全部翻译完成。<span class="basis-tag">external:</span> Producer-consumer overlap saves ~40% end-to-end；Toyota Kanban pull system。<span class="basis-tag">reasoned:</span> 翻译和 TTS 使用不同资源（LLM API vs TTS API），可并行而不争用。</p>
+    <p><strong>Rationale:</strong> 对 20 分钟视频（翻译 90s + TTS 60s），从 150s 串行降至 ~95s，节省 ~37%。不改变任何 API 行为，纯架构优化。翻译和 TTS 是独立 I/O 操作，重叠执行没有资源竞争。</p>
+    <p><strong>Downsides:</strong> 需要重构 orchestrator 的阶段控制流；Queue 有界性需要调优（太紧浪费吞吐，太松浪费内存）；错误传播需要仔细设计（翻译失败时 TTS 已开始的部分如何处理）。</p>
+  </article>
+
+  <article class="card" id="idea3">
+    <h3><span class="rank">3</span>移除嵌套 Executor — 统一事件循环架构</h3>
+    <div class="card-meta">
+      <span class="axis-chip">5. 架构减负</span>
+      <span class="confidence-high">Confidence 95%</span>
+      <span class="complexity-low">Complexity Low</span>
+    </div>
+    <p><strong>Description:</strong> 消除 TTS 路径的双层线程池：synthesizer.py:198 的 MiMo ThreadPoolExecutor(1)（仅为 timeout 存在）+ synthesizer.py:75 的外层 ThreadPoolExecutor(3)。改为单层线程池，用 future.result(timeout=300) 直接在外层 future 上设置超时。Edge TTS 的 asyncio.run() 每段创建/销毁事件循环（synthesizer.py:257）改为共享持久循环。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> synthesizer.py:198 TPE(1) 嵌套在 TPE(3) 内；synthesizer.py:257 asyncio.run() 每段新建循环。<span class="basis-tag">reasoned:</span> 嵌套 executor 产生 (3×1) 线程 + O(N) executor 构造开销；asyncio.run() 每次 ~5-20ms 循环创建开销，200 段 = 1-4s 纯浪费。</p>
+    <p><strong>Rationale:</strong> 移除无价值的线程嵌套，简化调用栈从 4 层到 2 层。消除 per-segment executor 分配（200 段 = 200 次 TPE 构造）。使线程模型可预测，为 #1 和 #2 的异步化铺平道路。风险极低——纯简化不改行为。</p>
+    <p><strong>Downsides:</strong> MiMo timeout 机制需要从 executor 迁移到 threading.Timer 或 asyncio.wait_for；需要验证 Edge TTS 共享事件循环下的线程安全性。</p>
+  </article>
+
+  <article class="card" id="idea4">
+    <h3><span class="rank">4</span>Adaptive Concurrency Discovery — TCP 式自适应并发</h3>
+    <div class="card-meta">
+      <span class="axis-chip">2. TTS 并发与引擎</span>
+      <span class="axis-chip">4. 超时与重试策略</span>
+      <span class="confidence-high">Confidence 75%</span>
+      <span class="complexity-low">Complexity Low</span>
+    </div>
+    <p><strong>Description:</strong> 用 AIMD（加法增加/乘法减少）算法替代硬编码的 batch_size=5 和 TTS concurrency=3。启动时保守（并发=2），每次成功后 +1，收到 429 后减半。系统自动发现 DeepSeek 和 Edge TTS 的实际速率上限，无需手动调优。类似 TCP 拥塞控制：探测上行，碰撞回退。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> client.py:334 batch_size=5 硬编码；synthesizer.py:38 concurrency=3 硬编码。<span class="basis-tag">external:</span> TCP Reno/NewReno AIMD (Jacobson 1988) 是最成熟的 adaptive 算法。<span class="basis-tag">reasoned:</span> 不同部署环境的速率限制不同（免费 vs 付费 API key、代理延迟、TTS provider），硬编码必然在某些环境下次优。</p>
+    <p><strong>Rationale:</strong> 消除手动调优步骤。用户切换 API key、更换 TTS provider 或部署到不同网络环境时无需改配置。DeepSeek 免费 tier（~20 RPM）和付费 tier（~200 RPM）的上限差异巨大——自适应并发对两者都有效。</p>
+    <p><strong>Downsides:</strong> 初始阶段吞吐偏低（需 warm-up 到最优并发）；AIMD 在突发流量下可能震荡；需要监控 429 响应的粒度（有些 API 返回 Retry-After header，有些不返回）。</p>
+  </article>
+
+  <article class="card" id="idea5">
+    <h3><span class="rank">5</span>Progressive MP3 Output — 渐进式流式输出</h3>
+    <div class="card-meta">
+      <span class="axis-chip">3. 阶段流水线化</span>
+      <span class="confidence-high">Confidence 80%</span>
+      <span class="complexity-medium">Complexity Medium</span>
+    </div>
+    <p><strong>Description:</strong> 不等管道完成就输出音频。每完成一个 TTS segment，立即将其 MP3 帧追加到输出文件（MP3 帧自带同步字，无需重新编码即可拼接）。用户提交 URL 后 5-10 秒就能听到开头内容，而不是等 5 分钟。前端用 HTTP Range 请求或 chunked transfer 逐步加载。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> orchestrator.py:524-540 merge 在管道末尾才执行。<span class="basis-tag">reasoned:</span> MP3 每帧 26ms 自带 sync word + header，字节级拼接无需 ffmpeg 重编码。<span class="basis-tag">reasoned:</span> 感知延迟比实测延迟更影响用户体验——5 秒听到声音 vs 5 分钟后听到，产品感知天差地别。</p>
+    <p><strong>Rationale:</strong> 这是感知延迟改善最大的单项改动。将用户心智模型从"批处理作业"变为"流媒体服务"。10 秒内出声音，即使完整管道仍需 60 秒，用户已开始收听。配合 #2（Producer-Consumer Pipeline），前几段在翻译开始后几乎立即可用。</p>
+    <p><strong>Downsides:</strong> 需要 CBR（恒定比特率）MP3 编码；进度条可能不均匀（前段快后段慢）；部分播放器对不完整 MP3 的 VBR header 兼容性差；需要最终 ffmpeg fixup 写入正确的时长元数据。</p>
+  </article>
+
+  <article class="card" id="idea6">
+    <h3><span class="rank">6</span>Token-Aware Adaptive Batching — 按 Token 数打包批次</h3>
+    <div class="card-meta">
+      <span class="axis-chip">1. 翻译并发化</span>
+      <span class="confidence-high">Confidence 85%</span>
+      <span class="complexity-low">Complexity Low</span>
+    </div>
+    <p><strong>Description:</strong> 用 tiktoken 计算每个 segment 的 token 数，贪心装箱算法将 segments 打包到接近 max_tokens=4096 上限的批次，替代固定 batch_size=5。短 segment（对话密集的视频）可一批装 15-20 段，减少 API 调用次数 40-60%。同时预先检测超长 segment，主动拆分而非等 API 返回 truncation 后才被动处理。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> client.py:334 batch_size=5；config.yaml max_tokens: 4096。<span class="basis-tag">reasoned:</span> whisper segment 长度方差极大（2 秒 vs 40 秒 → token 数差 10x）；固定 batch_size=5 对短段浪费 token 预算，对长段有 truncation 风险。<span class="basis-tag">direct:</span> client.py:263-280 TranslationTruncatedError 触发昂贵的 fallback_sequential——预先检测可避免。</p>
+    <p><strong>Rationale:</strong> 与 #1（Async Fan-Out）互补：#1 解决 API 调用的并发度，#6 减少 API 调用的总量。两者叠加效果倍增。预检测防止 truncation → fallback 的最坏情况（一批失败 → N 次串行重试，延迟放大 10x+）。</p>
+    <p><strong>Downsides:</strong> tiktoken 增加 ~1ms per-segment 开销；贪心装箱不能保证最优打包；大 batch 可能影响翻译质量（上下文稀释）——需要 A/B 测试验证质量边界。</p>
+  </article>
+
+  <article class="card" id="idea7">
+    <h3><span class="rank">7</span>Cancel Token Propagation — 阶段内取消响应</h3>
+    <div class="card-meta">
+      <span class="axis-chip">4. 超时与重试策略</span>
+      <span class="confidence-high">Confidence 90%</span>
+      <span class="complexity-low">Complexity Low</span>
+    </div>
+    <p><strong>Description:</strong> 当前取消检查仅在阶段之间（orchestrator.py:424-429），用户在 40 段翻译中点击取消需等到全部完成才能响应。将 cancel_event（或 asyncio.Event）注入每个翻译批次和 TTS segment 的循环内部，每次迭代检查 is_set()。设置 per-batch deadline（15s）防止卡住的 API 调用无限期阻塞取消。</p>
+    <p><strong>Basis:</strong> <span class="basis-tag">direct:</span> orchestrator.py:424-429 _check_cancel 只在阶段间运行。<span class="basis-tag">reasoned:</span> click-to-cancel 延迟 = 当前阶段剩余时间（最长可达数分钟），在 40 段翻译中点击取消等于无用。<span class="basis-tag">direct:</span> orchestrator.py:488 已有 daemon thread cancel 模式可以参考。</p>
+    <p><strong>Rationale:</strong> 响应式取消是 UX 基础设施。用户误提交 2 小时视频不应被强制等待或杀进程。配合 #1 的 asyncio 架构，CancelledError 自然传播，实现成本极低。是让其他加速方案"安全可取消"的前提——并发越高，越需要能随时停止。</p>
+    <p><strong>Downsides:</strong> 取消粒度需要在"每段检查"（频繁但安全）和"每批检查"（高效但延迟）之间权衡；取消后已完成的 TTS segment 如何清理需要设计。</p>
+  </article>
+</section>
+
+<section>
+  <h2>Rejection Summary</h2>
+  <table>
+    <thead>
+      <tr><th>Idea</th><th>Reason Rejected</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Edge TTS WebSocket Connection Pool</td><td class="reason">Folded into #3 — persistent event loop achieves the same connection reuse without pool complexity</td></tr>
+      <tr><td>LLM self-corrects batch format</td><td class="reason">Low hit rate — most truncation cases are token-limit, not format errors; #6 prevents the failure instead</td></tr>
+      <tr><td>Unify translate functions</td><td class="reason">Pure refactoring — zero user-facing impact; do as part of #1 but not a standalone priority</td></tr>
+      <tr><td>LLM semantic segmentation</td><td class="reason">Quality improvement, not speed — belongs in a translation-quality ideation, not here</td></tr>
+      <tr><td>Shared token-bucket rate limiter</td><td class="reason">Folded into #4 — AIMD adaptive concurrency inherently rate-limits; separate limiter is redundant</td></tr>
+      <tr><td>Translation memory with embeddings</td><td class="reason">Premature optimization — needs corpus of 50+ same-channel videos to pay off; revisit after usage data</td></tr>
+      <tr><td>Multi-provider TTS routing (ant colony / per-segment)</td><td class="reason">High implementation complexity for uncertain gain — needs quality measurement infrastructure first</td></tr>
+      <tr><td>Hedged requests (3 concurrent TTS, take fastest)</td><td class="reason">3x API cost for P99 latency reduction — not justified for a free personal tool</td></tr>
+      <tr><td>WAL segment-level checkpoint resume</td><td class="reason">Useful but orthogonal — resume reliability is not a speed concern; revisit in reliability ideation</td></tr>
+      <tr><td>Speculative TTS with quality-gated rollback</td><td class="reason">Quality risk (wrong TTS leaks to user) outweighs latency gain for speculative dispatch</td></tr>
+      <tr><td>Edge-only zero-cost pipeline</td><td class="reason">Already possible today by setting tts.provider=edge in config — no code change needed</td></tr>
+      <tr><td>Attention-weighted premium TTS tiering</td><td class="reason">Needs paid TTS account + quality measurement — out of scope for current free-tool positioning</td></tr>
+      <tr><td>Sub-60-second pipeline</td><td class="reason">Aspirational constraint, not a concrete idea — #1+#2+#3 combined approach this target</td></tr>
+      <tr><td>100-video batch factory</td><td class="reason">Scale mismatch — current usage is single-video; multi-video queuing belongs in a separate infrastructure ideation</td></tr>
+      <tr><td>Zero-LLM subtitle extraction</td><td class="reason">Already partially available via yt-dlp --write-subs; full subtitle-reuse needs separate feasibility study</td></tr>
+      <tr><td>Streaming translation (sentence-level TTS triggers)</td><td class="reason">Folded into #2 — producer-consumer at batch granularity is simpler and same ~40% gain</td></tr>
+      <tr><td>Multi-video job-level pipeline</td><td class="reason">Scale mismatch — single-video tool; multi-video is a different product category</td></tr>
+      <tr><td>Double buffering for translate/TTS</td><td class="reason">Special case of #2 (Producer-Consumer Pipeline) — bounded queue generalizes better</td></tr>
+      <tr><td>Per-segment RTGS-style dispatch</td><td class="reason">Folded into #1 — semaphore-gated async fan-out with per-segment dispatch is the implementation</td></tr>
+      <tr><td>Dynamic batch sizing by quality feedback</td><td class="reason">Folded into #6 — token-based packing is deterministic and cheaper than closed-loop quality feedback</td></tr>
+      <tr><td>TTS HTTP connection pooling</td><td class="reason">Folded into #3 — persistent event loop with shared httpx.AsyncClient handles connection reuse</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer class="composition-signal">
+  Composed 2026-07-03T09:50Z by ce-ideate from codebase scan + web research + learnings.
+</footer>
+
+</div>
+</body>
+</html>

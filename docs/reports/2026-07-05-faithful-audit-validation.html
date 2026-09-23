@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>忠实翻译审计修复验证</title>
+  <style>
+    :root{color-scheme:light dark;--bg:#f6f7fb;--card:#fff;--text:#172033;--muted:#667085;--ok:#166534;--okbg:#dcfce7;--warn:#92400e;--warnbg:#fef3c7;--border:#e4e7ec}
+    @media(prefers-color-scheme:dark){:root{--bg:#111827;--card:#1f2937;--text:#f3f4f6;--muted:#cbd5e1;--border:#374151;--okbg:#153c28;--ok:#86efac;--warnbg:#49320d;--warn:#fde68a}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif}main{width:min(900px,calc(100% - 28px));margin:28px auto}header,section{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:26px;margin:14px 0}h1{margin:0 0 6px;font-size:28px}h2{font-size:20px}p{max-width:72ch}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.metric{padding:14px;border:1px solid var(--border);border-radius:12px}.metric b{display:block;font-size:24px}.ok,.warn{padding:12px 14px;border-radius:12px}.ok{background:var(--okbg);color:var(--ok)}.warn{background:var(--warnbg);color:var(--warn)}code{font-family:ui-monospace,SFMono-Regular,monospace}@media(max-width:650px){.grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main>
+  <header>
+    <h1>忠实翻译审计修复验证</h1>
+    <p class="muted">2026-07-05 · 参考视频 STH929HARLo · 自动化验证已完成，真实 API 基准待浏览器凭据触发。</p>
+  </header>
+  <section>
+    <h2>当前结论</h2>
+    <div class="grid">
+      <div class="metric"><b>103</b><span>自动化测试通过</span></div>
+      <div class="metric"><b>0</b><span>Python / JavaScript 语法错误</span></div>
+      <div class="metric"><b>6</b><span>用户可见流水线阶段保持不变</span></div>
+    </div>
+    <p class="ok">通过：审计截断改为拆分；技术失败与内容缺陷分离；已知内容缺陷不会因修复后审计不可用而降级放行；质量状态可跨服务重启恢复。</p>
+    <p class="warn">待验证：浏览器本地保存的 API Key 不会写入服务器或环境变量，自动化进程无法代替用户发起三次真实翻译。因此 180 秒中位数和三模式严格输出验收尚不能宣告通过。</p>
+  </section>
+  <section>
+    <h2>真实验证步骤</h2>
+    <ol>
+      <li>打开页面，选择忠实翻译版并重新生成 <code>https://youtu.be/STH929HARLo</code>。</li>
+      <li>重复三次；下载、转写、清洗应显示复用缓存，只重新执行翻译、审计、TTS 和合并。</li>
+      <li>记录翻译开始至语义审计结束耗时；三次中位数必须不超过 180 秒。</li>
+      <li>确认进度页依次显示分段翻译、确定性门禁、语义审计和局部修复。</li>
+      <li>运行三模式严格评估；<code>degraded</code> 成品允许下载，但严格验收必须失败。</li>
+    </ol>
+  </section>
+</main></body></html>

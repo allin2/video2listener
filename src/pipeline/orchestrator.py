@@ -17,7 +17,12 @@ from src.pipeline.state import (
     check_shared_stage_file,
     check_variant_stage_file,
 )
-from src.youtube.extractor import extract as youtube_extract, check_connectivity
+from src.inputs import Platform
+from src.sources.router import extract as router_extract, check_connectivity as router_check_connectivity
+
+# 保持向后兼容（现有测试直接 monkeypatch orchestrator.youtube_extract / check_connectivity）
+youtube_extract = router_extract
+check_connectivity = router_check_connectivity
 from src.transcription.cleaner import clean as clean_text
 from src.transcription.transcriber import transcribe as whisper_transcribe
 from src.translation.client import (
@@ -48,7 +53,7 @@ def _resolve_title(video_id: str, data_dir: Path) -> str:
 
     1. 从 DB 已有记录取标题
     2. 尝试从 metadata.json 读取
-    3. 都没有：回退到 yt-dlp → video_id
+    3. 都没有：回退到 API / yt-dlp → video_id
     """
     episode = db.get_episode(video_id)
     if episode and episode.get("title_original"):
@@ -67,6 +72,12 @@ def _resolve_title(video_id: str, data_dir: Path) -> str:
 
     # 新视频：先快速获取标题
     try:
+        if video_id.startswith("BV"):
+            from src.sources.bilibili import _bili_get
+            data = _bili_get("/x/web-interface/view", {"bvid": video_id})
+            if data and data.get("code") == 0:
+                title = data["data"].get("title", video_id)
+                return _sanitize_filename(title)
         from src.youtube.extractor import _try_ydl
         cfg = get_config()
         proxy = cfg.get("network", {}).get("proxy", "")
@@ -307,12 +318,27 @@ async def _process_impl(
 
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    platform = (
+        Platform.BILIBILI if video_id.startswith("BV")
+        else Platform.DOUYIN if video_id.startswith("dy_")
+        else Platform.XIAOHONGSHU if video_id.startswith("xhs_")
+        else Platform.YOUTUBE
+    )
+    if platform == Platform.BILIBILI:
+        episode_url = f"https://www.bilibili.com/video/{video_id}"
+    elif platform == Platform.DOUYIN:
+        episode_url = f"https://www.douyin.com/video/{video_id[3:]}"
+    elif platform == Platform.XIAOHONGSHU:
+        episode_url = f"https://www.xiaohongshu.com/discovery/item/{video_id[4:]}"
+    else:
+        episode_url = f"https://www.youtube.com/watch?v={video_id}"
+
     # --- 初始化或加载共享记录 ---
     episode = db.get_episode(video_id)
     if episode is None:
         db.create_episode(
             video_id=video_id,
-            url=f"https://www.youtube.com/watch?v={video_id}",
+            url=episode_url,
             mode=mode,
             data_dir=str(data_dir),
         )
@@ -438,7 +464,7 @@ async def _process_impl(
 
         # --- Stage: metadata ---
         if _should_run(shared_status, TaskStatus.METADATA_FETCHED):
-            ok, detail = check_connectivity()
+            ok, detail = check_connectivity(platform)
             if not ok:
                 progress(f"❌ 网络不通: {detail}")
                 raise RuntimeError(detail)
@@ -473,6 +499,7 @@ async def _process_impl(
             episode = db.get_episode(video_id)
             captions_path_value = episode.get("captions_path") if episode else None
             captions_file = Path(captions_path_value) if captions_path_value else None
+            whisper_lang = "zh" if platform != Platform.YOUTUBE else "en"
             if captions_file and captions_file.is_file():
                 progress("开始语音转写...")
                 progress("加载已有字幕...")
@@ -486,7 +513,7 @@ async def _process_impl(
                 audio_files = list(data_dir.glob("*.wav")) + list(data_dir.glob("*.m4a"))
                 if audio_files:
                     progress("开始语音转写...")
-                    captions = await asyncio.to_thread(whisper_transcribe, audio_files[0], data_dir)
+                    captions = await asyncio.to_thread(whisper_transcribe, audio_files[0], data_dir, language=whisper_lang)
                     raw_text = "\n".join(c.get("text", "") for c in captions)
                     captions_path = str(data_dir / "captions_en.json")
                     db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
@@ -501,7 +528,7 @@ async def _process_impl(
                         progress("转写完成")
                     elif result.audio_path:
                         progress("无字幕，开始语音转写...")
-                        captions = await asyncio.to_thread(whisper_transcribe, result.audio_path, data_dir)
+                        captions = await asyncio.to_thread(whisper_transcribe, result.audio_path, data_dir, language=whisper_lang)
                         raw_text = "\n".join(c.get("text", "") for c in captions)
                         captions_path = str(data_dir / "captions_en.json")
                         db.update_status(video_id, TaskStatus.TEXT_READY.value, captions_path=captions_path)
@@ -531,7 +558,7 @@ async def _process_impl(
             return {"status": "cancelled", "video_id": video_id, "mode": mode, "output_path": None,
                     "message": "用户取消", "resumable_from": "text_ready"}
 
-        # --- Stage: translate ---
+        # --- Stage: translate / rewrite ---
         if _should_run(variant_status, TaskStatus.TRANSLATED):
             episode = db.get_episode(video_id)
             clean_text_content = Path(episode["transcript_clean_path"]).read_text(encoding="utf-8")
@@ -541,17 +568,38 @@ async def _process_impl(
                 "channel": episode.get("channel_name", ""),
             }
 
-            progress(f"开始翻译（模式: {mode}）...")
+            source_lang = "zh" if platform != Platform.YOUTUBE else "en"
+            meta_file = data_dir / "metadata.json"
+            if meta_file.exists():
+                try:
+                    loaded_meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    if "source_language" in loaded_meta:
+                        source_lang = loaded_meta["source_language"]
+                except Exception:
+                    pass
+
             translation_audit: dict = {}
-            script_zh = await llm_translate_async(
-                clean_text_content,
-                mode,
-                metadata,
-                on_progress=progress,
-                llm_config=llm_config,
-                cancel_event=cancel_event,
-                on_audit=translation_audit.update,
-            )
+            if source_lang == "zh" and mode == "faithful":
+                progress("忠实模式：保留中文原意，规整文稿...")
+                script_zh = clean_text_content
+                translation_audit = {
+                    "quality_status": "passed",
+                    "source_language": "zh",
+                    "mode": "faithful",
+                }
+            else:
+                action_name = "翻译" if source_lang == "en" else ("播客重述" if mode == "podcast" else "内容浓缩")
+                progress(f"开始{action_name}（模式: {mode}）...")
+                script_zh = await llm_translate_async(
+                    clean_text_content,
+                    mode,
+                    metadata,
+                    on_progress=progress,
+                    llm_config=llm_config,
+                    cancel_event=cancel_event,
+                    on_audit=translation_audit.update,
+                    source_language=source_lang,
+                )
             _validate_translation_output(clean_text_content, script_zh, mode)
             _ensure_distinct_mode_script(video_id, mode, script_zh)
             script_path = target_dir / "script_zh.txt"
@@ -772,7 +820,20 @@ async def _process_impl(
         _discard_variant_workspace(target_dir, final_target_dir)
         if shared_status != TaskStatus.TEXT_READY:
             db.update_status(video_id, TaskStatus.FAILED.value, error_message=error_msg)
-        elif not atomic_regeneration:
+        # 变体行必须记下自己的失败。历史列表读的是变体行状态，只写共享的 episode
+        # 行会让失败的变体在历史里停在 new（绿点），而 /api/status 用 episode 行
+        # 合成出的却是 failed —— 两个接口互相矛盾。
+        #
+        # 唯一例外：原子重跑且旧变体确实可用时，刻意保留旧成品，不用失败覆盖它
+        # （见 test_failed_force_regeneration_preserves_previous_variant）。若旧变体
+        # 本就没有可用产物，跳过写入会让用户重试失败后在历史里看不出任何变化。
+        previous = db.get_variant(video_id, mode)
+        previous_is_usable = bool(
+            previous
+            and previous.get("status") == TaskStatus.DONE.value
+            and previous.get("audio_zh_path")
+        )
+        if not (atomic_regeneration and previous_is_usable):
             db.update_variant_status(
                 video_id, mode, TaskStatus.FAILED.value, error_message=error_msg
             )

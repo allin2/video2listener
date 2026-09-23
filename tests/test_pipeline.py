@@ -221,6 +221,102 @@ def test_failed_force_regeneration_preserves_previous_variant(tmp_path, monkeypa
     assert not list(variant_dir.parent.glob(".faithful.regenerating-*"))
 
 
+def test_variant_failure_is_recorded_on_variant_row_not_only_episode(tmp_path, monkeypatch):
+    """变体失败必须写进变体行，不能只写共享的 episode 行。
+
+    回归：共享阶段未达 text_ready 时，失败只写到 episode 行，变体行停在 new。
+    历史列表读的是变体行状态，于是失败的变体在历史里显示为 new（绿点），
+    而 /api/status 用 episode 行合成出的却是 failed——两个接口互相矛盾。
+    """
+    monkeypatch.setattr(db, "_get_db_path", lambda: tmp_path / "test.db")
+    monkeypatch.setattr(
+        orchestrator,
+        "get_config",
+        lambda: {"_project_root": tmp_path, "app": {"data_dir": "data"}},
+    )
+    db.init_db()
+    data_dir = tmp_path / "data" / "Some_Title"
+    data_dir.mkdir(parents=True)
+    (data_dir / "metadata.json").write_text('{"title":"Some Title"}', encoding="utf-8")
+    # 有音频但没有共享字幕 → 共享阶段停在 metadata_fetched，会走转写
+    (data_dir / "audio.wav").write_bytes(b"fake-audio")
+
+    db.create_episode(
+        "video0000001", "https://youtu.be/video0000001", title="Some Title",
+        mode="podcast", data_dir=str(data_dir),
+    )
+    db.update_status(
+        "video0000001", "metadata_fetched",
+        metadata_path=str(data_dir / "metadata.json"),
+    )
+    # 同一视频已有一个完成的播客版
+    db.upsert_variant("video0000001", "podcast", status="done", audio_zh_path="/tmp/p.mp3")
+
+    def fail_transcribe(*_args, **_kwargs):
+        raise RuntimeError("No module named 'faster_whisper'")
+
+    monkeypatch.setattr(orchestrator, "whisper_transcribe", fail_transcribe)
+
+    result = orchestrator.process("video0000001", "faithful")
+
+    assert result["status"] == "failed"
+    assert db.get_episode("video0000001")["status"] == "failed"
+
+    failed_variant = db.get_variant("video0000001", "faithful")
+    assert failed_variant is not None, "变体行没有被创建/更新"
+    assert failed_variant["status"] == "failed"
+    assert "faster_whisper" in (failed_variant["error_message"] or "")
+
+    # 已完成的播客版不受影响
+    assert db.get_variant("video0000001", "podcast")["status"] == "done"
+
+
+def test_force_regeneration_of_empty_variant_records_failure(tmp_path, monkeypatch):
+    """强制重跑一个没有可用产物的变体时，失败必须记录到变体行。
+
+    这是 UI「重新生成此模式」的实际路径（action=regenerate_variant → force=True，
+    且变体行已存在 → atomic_regeneration=True）。旧实现只要 atomic_regeneration
+    为真就整体跳过写入，于是重试失败后历史仍停在 new，用户看不出任何变化。
+    与上一个测试的区别：这里旧变体**没有**可用产物，没有东西值得保留。
+    """
+    monkeypatch.setattr(db, "_get_db_path", lambda: tmp_path / "test.db")
+    monkeypatch.setattr(
+        orchestrator,
+        "get_config",
+        lambda: {"_project_root": tmp_path, "app": {"data_dir": "data"}},
+    )
+    db.init_db()
+    data_dir = tmp_path / "data" / "Existing_Title"
+    data_dir.mkdir(parents=True)
+    metadata = data_dir / "metadata.json"
+    metadata.write_text('{"title":"Existing Title"}', encoding="utf-8")
+    transcript = data_dir / "transcript_clean.txt"
+    transcript.write_text("The source has 11 sections.", encoding="utf-8")
+    db.create_episode(
+        "video123456", "https://youtu.be/video123456", title="Existing Title",
+        mode="faithful", data_dir=str(data_dir),
+    )
+    db.update_status(
+        "video123456", "text_ready", metadata_path=str(metadata),
+        transcript_clean_path=str(transcript),
+    )
+    # 变体行存在但没有任何可用产物
+    db.upsert_variant("video123456", "faithful", status="new")
+    assert db.get_variant("video123456", "faithful")["audio_zh_path"] in (None, "")
+
+    async def fail_translation(*_args, **_kwargs):
+        raise RuntimeError("simulated translation failure")
+
+    monkeypatch.setattr(orchestrator, "llm_translate_async", fail_translation)
+
+    result = orchestrator.process("video123456", "faithful", force=True)
+
+    saved = db.get_variant("video123456", "faithful")
+    assert result["status"] == "failed"
+    assert saved["status"] == "failed"
+    assert "simulated translation failure" in (saved["error_message"] or "")
+
+
 def test_new_mode_reuses_shared_source_and_preserves_existing_variant(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "_get_db_path", lambda: tmp_path / "test.db")
     monkeypatch.setattr(

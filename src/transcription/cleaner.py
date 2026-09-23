@@ -5,12 +5,38 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 广告关键词
+# 广告与互动套话关键词（支持英文与中文平台常见话术）
 AD_KEYWORDS = [
-    "subscribe", "like and subscribe", "hit the bell",
-    "check out my", "use my code", "discount code",
-    "sponsor", "sponsored by", "this episode is brought to you",
-    "patreon.com", "buy me a coffee",
+    # 英文求赞/关注/订阅/链接
+    "subscribe", "like and subscribe", "hit the bell", "hit the subscribe", "hit that subscribe",
+    "check out my", "use my code", "discount code", "promo code", "coupon code",
+    "sponsor", "sponsored by", "this episode is brought to you", "brought to you by",
+    "patreon.com", "patreon", "buy me a coffee",
+    "link in the description", "link in description", "links in the description", "link in bio",
+    "link below", "links below",
+    "leave a comment", "let me know in the comments", "hit the like button",
+    "free trial", "get 10% off", "get 20% off",
+    # 中文一键三连/求关注/求点赞
+    "一键三连", "点赞关注", "关注博主", "记得点赞", "点个赞", "投币", "求三连", "点赞收藏",
+    "求点赞", "别忘了点赞", "双击关注",
+    # 中文留评互动
+    "在评论区告诉我", "评论区见", "留评互动", "评论区留言", "写在评论区",
+    # 中文商业赞助/带货引流
+    "赞助", "赞助商", "赞助播出", "本期赞助", "感谢赞助", "商务合作", "优惠码", "折扣码", "福利码",
+    "置顶评论", "主页链接", "左下角链接", "点击下方链接", "简介区链接",
+]
+
+_AD_PATTERNS = [
+    re.compile(r"\b(?:sponsor(?:ed|ship)?|brought to you by)\b", re.IGNORECASE),
+    re.compile(r"\b(?:discount|promo(?:tion)?|coupon)\s+code\b", re.IGNORECASE),
+    re.compile(r"\b(?:use|enter)\s+(?:the\s+)?code\b", re.IGNORECASE),
+    re.compile(r"\blink\s+(?:is\s+)?in\s+(?:the\s+)?(?:description|bio)\b", re.IGNORECASE),
+    re.compile(r"\b(?:like\s+and\s+subscribe|hit\s+(?:the|that)\s+(?:bell|like|subscribe))\b", re.IGNORECASE),
+    re.compile(r"\bdownload\s+.+\s+for\s+free\b", re.IGNORECASE),
+    re.compile(r"\b(?:let\s+me\s+know|leave\s+a\s+comment)\s+in\s+the\s+comments\b", re.IGNORECASE),
+    re.compile(r"(?:一键三连|点赞关注|点个赞|求点赞|求三连|别忘了点赞|投币收藏|双击关注)", re.IGNORECASE),
+    re.compile(r"(?:赞助|赞助商|赞助播出|商务合作|优惠码|折扣码|福利码)", re.IGNORECASE),
+    re.compile(r"(?:置顶评论|评论区见|点击(?:下方|左下角)?链接|简介区链接)", re.IGNORECASE),
 ]
 
 SHORT_SENTENCE_MIN_WORDS = 8
@@ -46,11 +72,16 @@ def clean(text: str) -> tuple[str, int]:
             cleaned.append("")  # 保留段落空行
             continue
 
+        # 去除行内 URL（防止 raw link 泄漏到大模型翻译及 TTS 读出 "HTTP"）
+        line = re.sub(r"https?://\S+", "", line).strip()
+        if not line:
+            continue
+
         # 纯语气词行（仅含语气词 + 标点）
         if _is_filler_only(line):
             continue
 
-        # 广告段落
+        # 广告与互动套话段落
         if _contains_ad(line):
             logger.debug("Ad line removed: %s...", line[:60])
             continue
@@ -174,9 +205,11 @@ def _is_filler_only(line: str) -> bool:
 
 
 def _contains_ad(line: str) -> bool:
-    """检查是否包含广告内容。"""
+    """检查是否包含广告或互动套话内容。"""
     lower = line.lower()
-    return any(kw in lower for kw in AD_KEYWORDS)
+    if any(kw in lower for kw in AD_KEYWORDS):
+        return True
+    return any(bool(p.search(line)) for p in _AD_PATTERNS)
 
 
 def _merge_short_sentences(text: str) -> str:

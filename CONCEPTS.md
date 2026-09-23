@@ -4,7 +4,7 @@ Shared domain vocabulary for this project — entities, named processes, and sta
 
 ## Pipeline
 
-The multi-stage processing sequence that transforms a YouTube URL into Chinese MP3 audio. Stages run in order: Download (yt-dlp) → Transcribe (faster-whisper) → Clean (text normalization) → Translate (LLM, DeepSeek) → TTS (edge-tts / MiMo) → Merge (ffmpeg). Each stage produces intermediate artifacts; later stages can reuse artifacts from earlier runs when the source material is unchanged.
+The multi-stage processing sequence that transforms a YouTube URL into Chinese MP3 audio. Stages run in order: Download (yt-dlp) → Transcribe (whisper / faster-whisper) → Clean (text normalization) → Translate (LLM, DeepSeek) → TTS (edge-tts / MiMo) → Merge (ffmpeg). Each stage produces intermediate artifacts; later stages can reuse artifacts from earlier runs when the source material is unchanged.
 
 ## Translation Mode
 

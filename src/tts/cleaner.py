@@ -10,7 +10,7 @@ def clean_for_tts(text: str) -> str:
     """清洗中文播客稿，使其适合 TTS 朗读。
 
     - 去除 Markdown 标记和 URL
-    - 英文专有名词保留原样
+    - 英文专有名词保留原样（含下划线标识符）
     - 数字转为中文读法（简单的阿拉伯数字）
     - 长句拆分（≤ 50 字短句）
     - 去除不适合朗读的符号
@@ -31,7 +31,12 @@ def clean_for_tts(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
 
     # 去除不适合朗读的符号（保留中英文标点）
-    text = re.sub(r"[*_~`\[\]{}|\\]", "", text)
+    # 注意：不得删除下划线。技术标识符（环境变量名、snake_case 名称、Python
+    # dunder 如 __init__、文件名）中的下划线属于内容本身，删除会让朗读文本失真
+    # ——例如 VIDEO2LISTENER_DEEPSEEK_API_KEY 会变成 VIDEO2LISTENERDEEPSEEKAPIKEY。
+    # 这里也不做 `__强调__` 的还原：无法与 __init__ 这类标识符区分（两者在
+    # 散文中都是 "空格 + 双下划线 + 词 + 双下划线 + 空格"），保内容优先。
+    text = re.sub(r"[*~`\[\]{}|\\]", "", text)
 
     # 处理省略号
     text = text.replace("...", "。")

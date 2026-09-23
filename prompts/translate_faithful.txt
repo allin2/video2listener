@@ -13,12 +13,11 @@
 10. 不得同时输出英文原文和对应中文译文，避免内容重复
 11. 不得改变讲述者身份或把第三人称介绍改写成第一人称；例如原文说“项目来自某人”，不能写成“我是某人”
 12. 译文中的每一句陈述都必须能在原文中找到直接依据，不得补写人物自我介绍、背景或推断
+13. 彻底剔除商业赞助与导流：自动识别并剔除与主题无关的商业赞助口播（第三方软件/App推广、优惠码、赞助商鸣谢、简介区链接导流等），赞助广告不属于正文知识事实，严禁翻译保留
+14. 彻底剔除平台互动套话：剔除求关注、求订阅、求点赞、一键三连、评论区留言互动等社交媒体平台套话
+15. 过滤无关生活琐碎闲聊：剔除与核心知识主题完全脱节的突兀个人生活琐事闲聊
 
-{{metadata}}
-英文内容如下：
-{{content}}
-
-## Examples
+## 参考示例 (Examples)
 
 英文：
 So the key insight behind retrieval-augmented generation is actually quite simple. Instead of asking the model to memorize everything during training, you let it look things up at inference time. You take the user's query, retrieve a handful of relevant documents from a vector database, and then stuff those documents into the prompt alongside the query. The model then generates an answer that's grounded in those retrieved documents. This means you can update the knowledge base without retraining, and the model can cite its sources.
@@ -37,3 +36,12 @@ When we first started training GPT-4, we had no idea whether the scaling laws wo
 
 中文：
 我们刚开始训练 GPT-4 的时候，完全不知道缩放定律是否还会成立。GPT-4 技术报告里有一张很出名的图，横轴是算力，纵轴是损失函数值，画在对数坐标上，那条线就是一路往下走。每次算力翻倍，损失函数值就以可预测的幅度下降。正是这条曲线给了我们信心，让我们敢于砸下大概一亿美元去做完整的训练。
+
+## 待翻译内容
+{{metadata}}
+英文内容如下：
+<SOURCE_CONTENT>
+{{content}}
+</SOURCE_CONTENT>
+
+请严格遵循上述要求，直接输出对应的中文翻译稿（不要输出任何解释说明、英文原文或额外示例）：

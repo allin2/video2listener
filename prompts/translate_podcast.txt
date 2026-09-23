@@ -15,12 +15,11 @@
 12. 如果原文标注了说话人（[说话人 A]: / [说话人 B]:），请保留说话人标签，并在话轮之间增加自然的过渡语（如"A 问到…"、"B 回应说…"、"A 接着补充…"）
 13. 输入可能是原视频的连续片段，不要为每个片段重复添加节目开场、预告、总结或告别语
 14. 不得复制英文原文段落；仅专有名词、产品名和技术缩写可以保留英文
+15. 彻底剔除商业赞助与导流：自动识别并彻底剔除与核心主题无关的商业赞助口播（包括第三方软件/App推广、优惠码折扣、赞助商鸣谢、简介区链接下载导流等），即使博主以日常体验口吻软植入，也一律清除，不得在正文中保留
+16. 彻底剔除平台互动套话：剔除求关注、求订阅、求点赞、一键三连、评论区留言互动（如"在评论区告诉我"、"猜中送饼干"）、完播小测验等社交平台互动话术
+17. 过滤无关生活琐碎闲聊：剔除与核心知识主旨完全脱节的突兀个人生活琐事（如日常饮食、无关数码穿戴体验等）
 
-{{metadata}}
-英文内容如下：
-{{content}}
-
-## Examples
+## 参考示例 (Examples)
 
 英文：
 Host: So let's talk about AI agents. Everyone's building them, but nobody seems to agree on what an agent actually is. What's your definition?
@@ -32,7 +31,6 @@ Host: So the magic isn't in the model architecture, it's in the control flow aro
 Guest: Exactly. The model is the same GPT-4 you're already using. The difference is you give it a while-loop and a set of tools, and you let it run. What makes this powerful is composability — you can chain these things together, have one agent's output feed into another agent's input. And that's where things get really interesting.
 
 中文：
-
 主持人：今天我们来聊聊 AI 智能体。现在好像所有人都在做智能体，但大家对"智能体到底是什么"这件事，居然还没达成共识。不如先请你说说你的定义？
 
 嘉宾：这个问题问得好。我觉得，最基础地来看，智能体就是一个大语言模型，加上工具调用能力，再加上一个循环。就这么简单。平常我们跟模型对话，是你问一句、它答一句。但智能体不一样——模型会自己决定下一步该做什么。它可能会去调一个 API，可能会去搜索网页，也可能会写一段代码然后检查能不能跑通。它会一直这样循环下去，直到判断任务完成了。这就是所谓的"智能体循环"，其实没有更复杂的东西了。
@@ -49,9 +47,17 @@ Host: So what does a good eval pipeline look like?
 Guest: It starts with having a golden dataset — a set of inputs and expected outputs that you know are correct. This doesn't have to be huge; even a hundred well-curated examples can tell you a lot. You run your model against this dataset every time you make a change — a prompt tweak, a model upgrade, whatever — and you track whether you're getting better or worse. The second piece is LLM-as-judge. For more subjective tasks where there isn't a single right answer, you can use a stronger model to evaluate your model's outputs. It's not perfect, but it's way better than nothing, and it catches regressions that you'd never notice by eyeballing a few examples.
 
 中文：
-
 嘉宾：我想聊一个关注度远远不够的话题——评测。现在所有人的注意力都在"造东西"上面，造模型、造基础设施、造产品。但你造出来的东西到底好不好，你怎么知道呢？就我的经验来看，大部分团队其实没有一套正经的评测流程。他们的做法就是靠感觉看一看，翻几个输出瞅两眼，觉得差不多就行了。做 Demo 这么搞没问题，但你要交付一个用户真正依赖的产品，这种方法是完全行不通的。
 
 主持人：那好的评测流程到底应该长什么样？
 
 嘉宾：首先你得有一套"金标准数据集"——就是一组你已经确认正确的输入输出对。规模不需要很大，哪怕只有一百个精心整理的样本，也能告诉你很多信息。每次你做任何改动——调个提示词、升级个模型、不管是什么改动——你都要拿这个数据集跑一遍模型，然后跟踪结果到底是变好了还是变差了。第二个关键手段是"LLM 当裁判"。对于那些比较主观、没有唯一正确答案的任务，你可以用一个更强大的模型来给你的模型输出打分。这个方法不是完美的，但绝对比什么都不做要强得多。而且它能帮你发现很多问题——那些你光靠肉眼翻几个例子根本不会注意到的性能回退，都能被它揪出来。
+
+## 待翻译内容
+{{metadata}}
+英文内容如下：
+<SOURCE_CONTENT>
+{{content}}
+</SOURCE_CONTENT>
+
+请严格遵循上述要求与风格，直接输出对应的中文播客稿（不要输出任何解释说明、开场白或额外示例）：

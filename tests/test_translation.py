@@ -36,6 +36,26 @@ def test_summary_prompt_exists():
     assert "{{content}}" in prompt
 
 
+def test_prompts_place_examples_before_content():
+    """验证翻译提示词中示例位于正文之前，避免模型把结尾示例当成待续写内容。"""
+    for mode, filename in MODE_PROMPTS.items():
+        prompt = _load_prompt(filename)
+        if "## 参考示例" in prompt:
+            ex_pos = prompt.index("## 参考示例")
+            content_pos = prompt.index("{{content}}")
+            assert ex_pos < content_pos, f"In {filename}, examples should precede target content"
+
+
+def test_split_truncated_segment_prefers_paragraphs():
+    from src.translation.client import _split_truncated_segment
+    text = "Paragraph 1\n\nParagraph 2\n\nParagraph 3\n\nParagraph 4"
+    parts = _split_truncated_segment(text)
+    assert len(parts) == 2
+    assert parts[0] == "Paragraph 1\n\nParagraph 2"
+    assert parts[1] == "Paragraph 3\n\nParagraph 4"
+
+
+
 def test_prompt_contains_keywords():
     """忠实模式以核心语义和关键信息为目标，不要求逐字逐句复刻。"""
     prompt = _load_prompt("translate_faithful.txt")

@@ -3,1555 +3,261 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>video2listener — YouTube 转中文 MP3 播客</title>
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: #f5f5f5; color: #333; line-height: 1.6;
-    min-height: 100vh; display: flex; justify-content: center; padding: 2rem 1rem;
-  }
-  .container { width: 100%; max-width: 640px; }
-  header { text-align: center; margin-bottom: 2rem; }
-  header h1 { font-size: 1.8rem; font-weight: 700; color: #1a1a1a; }
-  header p { color: #666; margin-top: 0.25rem; font-size: 0.95rem; }
-
-  .card {
-    background: #fff; border-radius: 12px; padding: 1.5rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1rem;
-  }
-  .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: #1a1a1a; }
-
-  .form-group { margin-bottom: 0.85rem; }
-  .form-group label { display: block; font-weight: 600; margin-bottom: 0.3rem; font-size: 0.88rem; color: #444; }
-  .form-group input[type="text"], .form-group input[type="password"], .form-group select {
-    width: 100%; padding: 0.6rem 0.8rem; border: 1.5px solid #ddd;
-    border-radius: 8px; font-size: 0.92rem; transition: border-color 0.2s; background: #fff;
-  }
-  .form-group input:focus, .form-group select:focus { outline: none; border-color: #4f46e5; }
-  .form-row { display: flex; gap: 0.5rem; }
-  .form-row .form-group:first-child { flex: 1; }
-  .form-row .btn { width: auto; white-space: nowrap; padding: 0.6rem 0.9rem; font-size: 0.88rem; }
-
-  .section-hr { border: none; border-top: 1px solid #eee; margin: 1.2rem 0; }
-
-  .radio-group { display: flex; gap: 0.75rem; flex-wrap: wrap; }
-  .radio-group label {
-    display: flex; align-items: center; gap: 0.35rem;
-    padding: 0.45rem 0.85rem; border: 1.5px solid #ddd; border-radius: 8px;
-    cursor: pointer; font-size: 0.9rem; transition: all 0.2s;
-  }
-  .radio-group label:hover { border-color: #4f46e5; background: #f8f7ff; }
-  .radio-group input[type="radio"]:checked + span { font-weight: 600; color: #4f46e5; }
-  .radio-group label:has(input:checked) { border-color: #4f46e5; background: #f0efff; }
-
-  .btn {
-    width: 100%; padding: 0.75rem; border: none; border-radius: 8px;
-    font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
-  }
-  .btn:disabled { background: #c7c7c7 !important; cursor: not-allowed; }
-  .btn-primary { background: #4f46e5; color: #fff; }
-  .btn-primary:hover:not(:disabled) { background: #4338ca; }
-  .btn-secondary { background: #e0e7ff; color: #4f46e5; }
-  .btn-secondary:hover:not(:disabled) { background: #c7d2fe; }
-  .btn-download { background: #16a34a; color: #fff; margin-top: 0.75rem; }
-  .btn-download:hover { background: #15803d; }
-  .result-actions { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0.65rem; margin-top: 0.75rem; }
-  .result-actions .btn { margin-top: 0; }
-
-  .hint { font-size: 0.75rem; color: #999; margin-top: 0.18rem; }
-  .config-memory {
-    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-    padding: 0.75rem 0.9rem; margin: 0.2rem 0 1rem;
-    border: 1px solid #e5e7eb; border-radius: 10px; background: #fafafa;
-  }
-  .config-memory label { display: flex; align-items: center; gap: 0.5rem; font-size: 0.84rem; font-weight: 600; cursor: pointer; }
-  .config-memory input { width: 1rem; height: 1rem; accent-color: #4f46e5; }
-  .config-memory .memory-copy { flex: 1; }
-  .config-memory .memory-note { color: #8a8a8a; font-size: 0.72rem; font-weight: 400; margin-top: 0.12rem; }
-  .btn-text { width: auto; padding: 0.35rem 0.55rem; background: transparent; color: #6b7280; font-size: 0.78rem; }
-  .btn-text:hover { color: #dc2626; background: #fef2f2; }
-
-  .status-badge {
-    display: inline-block; padding: 0.2rem 0.75rem; border-radius: 20px;
-    font-size: 0.85rem; font-weight: 600;
-  }
-  .status-queued { background: #fef3c7; color: #92400e; }
-  .status-processing { background: #dbeafe; color: #1e40af; }
-  .status-done { background: #dcfce7; color: #166534; }
-  .status-failed { background: #fee2e2; color: #991b1b; }
-
-  .meta { font-size: 0.85rem; color: #888; margin: 0.25rem 0 0.75rem; }
-  .progress-log {
-    background: #f9fafb; border-radius: 8px; padding: 0.75rem;
-    max-height: 240px; overflow-y: auto; font-size: 0.88rem;
-  }
-  .progress-log .entry { padding: 0.2rem 0; border-bottom: 1px solid #f0f0f0; color: #555; }
-  .progress-log .entry:last-child { border-bottom: none; }
-  .error-msg { color: #dc2626; font-size: 0.9rem; white-space: pre-wrap; }
-  .hidden { display: none !important; }
-
-  /* ── Pipeline Timeline ──────────────────────────────────────────────── */
-  .pipeline-timeline { display: flex; flex-direction: column; gap: 0; }
-  .stage-node { display: flex; align-items: flex-start; gap: 0.75rem; position: relative; padding-bottom: 0.7rem; cursor: default; }
-  .stage-node:last-child { padding-bottom: 0; }
-  .stage-dot {
-    width: 14px; height: 14px; border-radius: 50%; margin-top: 3px; flex-shrink: 0;
-    position: relative; z-index: 1; transition: background 0.3s, box-shadow 0.3s;
-  }
-  .stage-dot.pending { background: #d1d5db; border: 2px solid #d1d5db; }
-  .stage-dot.active { background: #4f46e5; box-shadow: 0 0 0 4px rgba(79,70,229,.25); animation: stagePulse 1.5s ease-in-out infinite; }
-  .stage-dot.done { background: #16a34a; }
-  .stage-dot.reused { background: #16a34a; box-shadow: 0 0 0 5px #dcfce7; }
-  .stage-dot.failed { background: #dc2626; }
-  .stage-dot.cancelled { background: #9ca3af; }
-  @keyframes stagePulse {
-    0%, 100% { box-shadow: 0 0 0 4px rgba(79,70,229,.25); }
-    50% { box-shadow: 0 0 0 8px rgba(79,70,229,.08); }
-  }
-  .stage-line {
-    position: absolute; left: 6px; top: 20px; width: 2px; height: calc(100% - 8px); background: #e5e7eb; z-index: 0;
-  }
-  .stage-line.done { background: #16a34a; }
-  .stage-line.reused { background: #16a34a; }
-  .stage-info { flex: 1; min-width: 0; }
-  .stage-name { font-size: 0.88rem; font-weight: 600; color: #6b7280; margin-bottom: 1px; transition: color 0.3s; }
-  .stage-name.active { color: #4f46e5; }
-  .stage-name.done { color: #1a1a1a; }
-  .stage-name.reused { color: #166534; }
-  .stage-name.failed { color: #dc2626; }
-  .stage-meta { font-size: 0.75rem; color: #9ca3af; }
-  .stage-meta .duration { color: #6b7280; }
-  .stage-log-panel {
-    display: none; margin-top: 0.4rem; padding: 0.5rem 0.6rem; background: #f9fafb; border-radius: 6px;
-    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; color: #6b7280;
-    border-left: 2px solid #e5e7eb; max-height: 160px; overflow-y: auto; line-height: 1.5; white-space: pre-wrap;
-  }
-  .stage-log-panel.active { border-left-color: #4f46e5; }
-  .stage-log-panel.expanded { display: block; }
-  .stage-log-panel .log-entry { color: #6b7280; }
-  .stage-log-panel .log-entry:last-child { color: #374151; }
-  .stage-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
-  .stage-btn {
-    padding: 0.3rem 0.75rem; border: 1.5px solid #d1d5db; border-radius: 6px;
-    background: #fff; font-size: 0.78rem; cursor: pointer; transition: all 0.2s;
-  }
-  .stage-btn:hover { border-color: #6b7280; }
-  .stage-btn.cancel-btn { color: #dc2626; border-color: #fecaca; }
-  .stage-btn.cancel-btn:hover { background: #fef2f2; border-color: #dc2626; }
-  .stage-btn.cancel-btn:disabled { color: #9ca3af; border-color: #e5e7eb; background: #f9fafb; cursor: not-allowed; }
-  .stage-btn.retry-btn { color: #4f46e5; border-color: #c7d2fe; }
-  .stage-btn.retry-btn:hover { background: #f0efff; border-color: #4f46e5; }
-
-  /* ── Duplicate Modal ───────────────────────────────────────────────── */
-  .modal-overlay {
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    z-index: 1000; justify-content: center; align-items: center; padding: 1rem;
-  }
-  .modal-overlay.open { display: flex; }
-  .modal-box {
-    background: #fff; border-radius: 12px; padding: 1.5rem; max-width: 400px; width: 100%;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.15); animation: modalIn 0.2s ease-out;
-  }
-  @keyframes modalIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-  .modal-box h3 { font-size: 1.05rem; margin-bottom: 0.6rem; color: #1a1a1a; }
-  .modal-box p { font-size: 0.9rem; color: #555; margin-bottom: 1.2rem; line-height: 1.5; }
-  .modal-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; }
-  .modal-actions .btn { width: 100%; margin: 0; }
-  .modal-download { background: #16a34a; color: #fff; }
-  .modal-download:hover { background: #15803d; }
-  .modal-regenerate { background: #e0e7ff; color: #4f46e5; }
-  .modal-regenerate:hover { background: #c7d2fe; }
-
-  /* ── History Drawer ────────────────────────────────────────────────── */
-  .header-row { display: flex; align-items: center; justify-content: space-between; }
-  .btn-history {
-    width: auto; padding: 0.4rem 0.85rem; border: 1.5px solid #ddd; border-radius: 8px;
-    background: #fff; font-size: 0.88rem; cursor: pointer; transition: all 0.2s;
-  }
-  .btn-history:hover { border-color: #4f46e5; color: #4f46e5; }
-  .history-overlay {
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3);
-    z-index: 1001; justify-content: flex-end;
-  }
-  .history-overlay.open { display: flex; }
-  .history-drawer {
-    width: 380px; max-width: 90vw; height: 100%; background: #fff;
-    box-shadow: -2px 0 16px rgba(0,0,0,0.12); display: flex; flex-direction: column;
-    transform: translateX(100%); transition: transform 0.25s ease-out;
-  }
-  .history-overlay.open .history-drawer { transform: translateX(0); }
-  .history-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1rem 1.2rem; border-bottom: 1px solid #eee; flex-shrink: 0;
-  }
-  .history-header h3 { font-size: 1rem; margin: 0; }
-  .history-close {
-    width: 32px; height: 32px; border: none; background: none; font-size: 1.3rem;
-    cursor: pointer; color: #888; border-radius: 6px; display: flex; align-items: center; justify-content: center;
-  }
-  .history-close:hover { background: #f0f0f0; color: #333; }
-  .history-list { flex: 1; overflow-y: auto; padding: 0.5rem 0; }
-  .history-empty { text-align: center; color: #999; padding: 2rem 1rem; font-size: 0.9rem; }
-  .task-row {
-    padding: 0.65rem 1.2rem; border-bottom: 1px solid #f5f5f5; cursor: pointer;
-    transition: background 0.15s;
-  }
-  .task-row:hover { background: #f9fafb; }
-  .task-row-main { display: flex; align-items: center; gap: 0.5rem; }
-  .task-row-title { flex: 1; font-size: 0.85rem; font-weight: 600; color: #1a1a1a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task-row-badge { font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 10px; font-weight: 600; white-space: nowrap; }
-  .badge-podcast { background: #e0e7ff; color: #4f46e5; }
-  .badge-faithful { background: #fef3c7; color: #92400e; }
-  .badge-condensed { background: #fce7f3; color: #9d174d; }
-  .task-row-status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .status-dot-done { background: #16a34a; }
-  .status-dot-failed { background: #dc2626; }
-  .status-dot-cancelled { background: #9ca3af; }
-  .status-dot-processing { background: #4f46e5; animation: stagePulse 1.5s ease-in-out infinite; }
-  .task-row-actions { display: flex; gap: 0.3rem; margin-left: 0.5rem; }
-  .task-row-icon {
-    width: 28px; height: 28px; border: none; background: none; cursor: pointer;
-    border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.9rem;
-  }
-  .task-row-icon:hover { background: #f0f0f0; }
-  .task-row-icon.del:hover { background: #fef2f2; color: #dc2626; }
-  .task-row-detail { display: none; margin-top: 0.45rem; padding-top: 0.45rem; border-top: 1px solid #f0f0f0; font-size: 0.78rem; color: #6b7280; }
-  .task-row.expanded .task-row-detail { display: block; }
-  .task-row-detail span { display: block; margin-bottom: 0.15rem; }
-  .task-row-confirm { display: none; gap: 0.4rem; margin-top: 0.35rem; }
-  .task-row.confirming .task-row-confirm { display: flex; }
-  .task-row.confirming .task-row-actions { display: none; }
-  .task-row-fade { opacity: 0; transform: translateX(20px); transition: all 0.3s; }
-  .history-footer { padding: 0.6rem 1.2rem; border-top: 1px solid #eee; font-size: 0.78rem; color: #999; flex-shrink: 0; }
-  .quality-notice { margin:.75rem 0; padding:.7rem .85rem; border-radius:.7rem; font-size:.86rem; font-weight:650; }
-  .quality-notice.passed { background:#dcfce7; color:#166534; }
-  .quality-notice.degraded { background:#fef3c7; color:#92400e; }
-  .quality-chip { display:inline-block; margin-left:.35rem; padding:.12rem .42rem; border-radius:999px; background:#fef3c7; color:#92400e; font-size:.68rem; font-weight:700; }
-
-  /* ── Key Field UX ──────────────────────────────────────────────────── */
-  .key-input-wrap { position: relative; display: flex; align-items: center; }
-  .key-input-wrap input { padding-right: 4.2rem; }
-  .key-toggle, .key-copy {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    width: 28px; height: 28px; border: none; background: none; cursor: pointer;
-    border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.85rem;
-  }
-  .key-toggle { right: 2rem; }
-  .key-copy { right: 0.3rem; }
-  .key-toggle:hover, .key-copy:hover { background: #f0f0f0; }
-  .help-icon {
-    display: inline-flex; width: 16px; height: 16px; border-radius: 50%;
-    background: #e5e7eb; color: #6b7280; font-size: 0.65rem; font-weight: 700;
-    align-items: center; justify-content: center; cursor: pointer; margin-left: 0.3rem; vertical-align: middle;
-  }
-  .help-icon:hover { background: #d1d5db; color: #374151; }
-  .help-tooltip {
-    display: none; position: absolute; z-index: 10; background: #1f2937; color: #f9fafb;
-    font-size: 0.75rem; padding: 0.5rem 0.7rem; border-radius: 6px; max-width: 260px;
-    line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-  }
-  .help-tooltip.show { display: block; }
-  .field-error input, .field-error select { border-color: #dc2626 !important; }
-  .field-error .err-msg { color: #dc2626; font-size: 0.75rem; margin-top: 0.18rem; }
-  .security-banner {
-    display: flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.75rem;
-    background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px;
-    font-size: 0.82rem; color: #92400e; font-weight: 500;
-  }
-
-  @media (max-width: 480px) {
-    body { padding: 1rem 0.5rem; }
-    .card { padding: 1rem; }
-    header h1 { font-size: 1.4rem; }
-    .form-row { flex-direction: column; }
-    .config-memory { align-items: flex-start; }
-    .result-actions { grid-template-columns: 1fr; }
-  }
-</style>
+<title>video2listener · YouTube 转中文播客</title>
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/components.css">
+<link rel="stylesheet" href="/static/css/views.css">
 </head>
 <body>
-<div class="container">
-  <header>
-    <div class="header-row">
+
+<!-- ============ App Bar ============ -->
+<header class="appbar">
+  <div class="appbar__brand"><span class="logo">🎧</span>video2listener</div>
+  <div class="appbar__actions">
+    <button class="btn btn--icon" id="themeBtn" title="切换深浅色">🌙</button>
+    <button class="btn btn--ghost" id="historyBtn">📋 历史任务</button>
+    <button class="btn btn--secondary" id="settingsBtn">⚙️ API 与音色设置</button>
+  </div>
+</header>
+
+<main class="main">
+
+  <!-- ============ View: Submit ============ -->
+  <section id="viewSubmit">
+    <div class="hero">
+      <h1>YouTube 链接 → <span class="gradient-text">母语级中文播客</span></h1>
+      <p>本地优先 · 自备 Key · 通勤路上听一手海外 AI 资讯</p>
+    </div>
+
+    <div class="url-input-wrap" id="urlWrap">
+      <input class="url-input" id="urlInput" placeholder="粘贴视频链接或 App 分享文案（支持 YouTube、B站、抖音、小红书等）" autofocus>
+      <button class="btn btn--icon" id="urlClearBtn" title="清空" hidden>✕</button>
+    </div>
+    <div class="field-err" id="urlErr" hidden>请输入有效的视频链接或 App 分享文案（支持 YouTube、B站、抖音、小红书等）</div>
+
+    <div class="mode-grid" role="radiogroup" aria-label="输出模式">
+      <button class="mode-card is-selected" data-mode="podcast" role="radio" aria-checked="true">
+        <div class="mode-card__icon">🎙️</div>
+        <div class="mode-card__name">中文播客版<span class="badge badge--podcast">默认推荐</span></div>
+        <div class="mode-card__desc">自然口语流，像专业科技主播在讲，绝不凭空捏造事实</div>
+        <span class="mode-card__check">✓</span>
+      </button>
+      <button class="mode-card" data-mode="faithful" role="radio" aria-checked="false">
+        <div class="mode-card__icon">📑</div>
+        <div class="mode-card__name">忠实翻译版</div>
+        <div class="mode-card__desc">逐句对应原文，保留全部数字与术语，附质量审计</div>
+        <span class="mode-card__check">✓</span>
+      </button>
+      <button class="mode-card" data-mode="condensed" role="radio" aria-checked="false">
+        <div class="mode-card__icon">⚡</div>
+        <div class="mode-card__name">精华浓缩版</div>
+        <div class="mode-card__desc">压缩至 30%~50%，60 分钟长视频变 20 分钟干货</div>
+        <span class="mode-card__check">✓</span>
+      </button>
+    </div>
+
+    <button class="btn btn--primary btn--lg btn--block" id="submitBtn">开始处理 →</button>
+    <p class="submit-hint">默认使用免费 Edge-TTS 语音 · LLM 密钥等配置在右上角 <button id="hintSettingsBtn">⚙️ 设置</button></p>
+  </section>
+
+  <!-- ============ View: Progress ============ -->
+  <section id="viewProgress" hidden>
+    <div class="panel">
+      <div class="progress-head">
+        <div class="progress-head__title">
+          <span class="badge badge--podcast" id="pModeBadge"></span>
+          <span class="t" id="pTitle"></span>
+        </div>
+        <div class="progress-head__meta">
+          <span class="mono" id="pElapsed">00:00</span>
+          <span class="badge badge--active" id="pStatus">处理中</span>
+          <span class="conn-tag" id="connTag" hidden>🔄 连接中断，正在轮询</span>
+          <button class="btn btn--danger btn--sm" id="cancelBtn">⏹ 取消</button>
+        </div>
+      </div>
+      <ul class="timeline" id="timeline"></ul>
+    </div>
+  </section>
+
+  <!-- ============ View: Result ============ -->
+  <section id="viewResult" hidden>
+    <div class="audit-banner" id="auditBanner" hidden></div>
+    <div class="panel">
+      <div class="result-body">
+        <div class="result-title" id="rTitle"></div>
+        <div class="result-meta" id="rMeta"></div>
+        <div class="dl-list" id="dlList"></div>
+        <div class="result-actions">
+          <button class="btn btn--primary" id="playBtn">▶️ 在线试听</button>
+          <button class="btn btn--secondary" id="copyScriptBtn" hidden>📋 复制脚本</button>
+          <button class="btn btn--ghost" id="newTaskBtn">← 处理新视频</button>
+        </div>
+        <div class="tabs">
+          <button class="tab is-active" data-tab="script" id="tabScriptBtn">中文脚本</button>
+          <button class="tab" data-tab="summary" id="tabSummaryBtn">内容摘要</button>
+        </div>
+        <div class="tab-panel" id="tabPanelEl" hidden>加载中…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ View: Error ============ -->
+  <section id="viewError" hidden>
+    <div class="panel error-panel">
+      <div class="err-icon">😵</div>
+      <h2 id="errTitle">处理失败</h2>
+      <p id="errMsg"></p>
       <div>
-        <h1>🎧 video2listener</h1>
-        <p>英文 YouTube 视频 → 中文 MP3 播客</p>
-      </div>
-      <button class="btn-history" id="historyBtn">📋 历史</button>
-    </div>
-  </header>
-
-  <div class="card" id="formCard">
-    <h2>⚙️ 配置 & 输入</h2>
-    <form id="submitForm" autocomplete="off">
-
-      <!-- ═══ LLM 翻译配置 ═══ -->
-      <fieldset style="border:1.5px solid #e0e7ff; border-radius:10px; padding:1rem 1rem 0.5rem; margin-bottom:1rem;">
-        <legend style="font-weight:700; color:#4f46e5; padding:0 0.4rem;">🤖 LLM 翻译配置</legend>
-        <div class="form-group">
-          <label for="llmApiKey">API Key <span class="help-icon" data-help="llmKey">?</span></label>
-          <span class="help-tooltip" id="help-llmKey">此密钥仅用于调用 LLM API（翻译），不会上传至 video2listener 服务器。每次请求直接从您的浏览器发送至 API 提供商。</span>
-          <div class="key-input-wrap">
-            <input type="password" id="llmApiKey" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx">
-            <button type="button" class="key-toggle" data-target="llmApiKey" title="显示/隐藏">👁️</button>
-            <button type="button" class="key-copy" data-target="llmApiKey" title="复制">📋</button>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="llmBaseUrl">Base URL</label>
-            <input type="text" id="llmBaseUrl" placeholder="https://api.deepseek.com" value="https://api.deepseek.com">
-          </div>
-          <div class="form-group" style="align-self: flex-end;">
-            <label>&nbsp;</label>
-            <button type="button" class="btn btn-secondary" id="fetchModelsBtn">查询模型</button>
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="modelSelect">模型</label>
-          <select id="modelSelect"><option value="">请先点击「查询模型」</option></select>
-        </div>
-      </fieldset>
-
-      <!-- ═══ TTS 语音配置 ═══ -->
-      <fieldset style="border:1.5px solid #d1fae5; border-radius:10px; padding:1rem 1rem 0.5rem; margin-bottom:1rem;">
-        <legend style="font-weight:700; color:#059669; padding:0 0.4rem;">🔊 TTS 语音配置</legend>
-        <div class="form-group">
-          <label for="ttsApiKey">API Key <span class="help-icon" data-help="ttsKey">?</span></label>
-          <span class="help-tooltip" id="help-ttsKey">此密钥仅用于调用 TTS API（语音合成），不会上传至 video2listener 服务器。每次请求直接从您的浏览器发送至 API 提供商。</span>
-          <div class="key-input-wrap">
-            <input type="password" id="ttsApiKey" placeholder="sk-...（留空则使用免费 Edge TTS）">
-            <button type="button" class="key-toggle" data-target="ttsApiKey" title="显示/隐藏">👁️</button>
-            <button type="button" class="key-copy" data-target="ttsApiKey" title="复制">📋</button>
-          </div>
-          <p class="hint">留空自动使用 Edge TTS（免费，无需 API Key）</p>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="ttsBaseUrl">Base URL</label>
-            <input type="text" id="ttsBaseUrl" placeholder="https://api.xiaomimimo.com/v1" value="https://api.xiaomimimo.com/v1">
-          </div>
-          <div class="form-group" style="align-self: flex-end;">
-            <label>&nbsp;</label>
-            <button type="button" class="btn btn-secondary" id="fetchVoicesBtn">加载官方音色</button>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label for="ttsModel">模型</label>
-            <input type="text" id="ttsModel" placeholder="mimo-v2.5-tts" value="mimo-v2.5-tts">
-          </div>
-          <div class="form-group" style="flex:2;">
-            <label for="ttsVoice">音色</label>
-            <div style="display:flex;gap:0.4rem;">
-              <select id="ttsVoice" style="flex:1;">
-              <option value="冰糖">冰糖 · 中文女声</option>
-              <option value="茉莉">茉莉 · 中文女声</option>
-              <option value="苏打" selected>苏打 · 中文男声</option>
-              <option value="白桦">白桦 · 中文男声</option>
-              <option value="Mia">Mia · English female</option>
-              <option value="Chloe">Chloe · English female</option>
-              <option value="Milo">Milo · English male</option>
-              <option value="Dean">Dean · English male</option>
-            </select>
-            <button type="button" class="stage-btn" id="previewTtsBtn" title="试听音色">🔊 试听</button>
-          </div>
-          </div>
-        </div>
-      </fieldset>
-
-      <div class="config-memory">
-        <div class="memory-copy">
-          <label><input type="checkbox" id="rememberConfig" checked>在此浏览器记住配置</label>
-          <div class="security-banner">🔒 密钥仅存储于此浏览器本地，不会上传至服务器</div>
-        </div>
-        <button type="button" class="btn btn-text" id="clearConfigBtn">清除保存</button>
-      </div>
-
-      <!-- ═══ 视频输入 ═══ -->
-      <div class="form-group">
-        <label for="url">🔗 YouTube 链接</label>
-        <input type="text" id="url" placeholder="https://www.youtube.com/watch?v=xxx 或 youtu.be/xxx">
-      </div>
-      <div class="form-group">
-        <label>🎙️ 输出模式</label>
-        <div class="radio-group">
-          <label><input type="radio" name="mode" value="podcast" checked><span>中文播客版</span></label>
-          <label><input type="radio" name="mode" value="faithful"><span>忠实翻译版</span></label>
-          <label><input type="radio" name="mode" value="condensed"><span>精华浓缩版</span></label>
-        </div>
-      </div>
-      <button type="submit" class="btn btn-primary" id="submitBtn">开始处理</button>
-    </form>
-    <p style="margin-top: 0.75rem; font-size: 0.8rem; color: #aaa; text-align: center;">
-      处理通常需要 5–15 分钟，请耐心等待
-    </p>
-  </div>
-
-  <!-- 进度 / 结果 / 错误面板不变 -->
-  <div class="card hidden" id="progressCard">
-    <h2 id="progressTitle">⏳ 处理中</h2>
-    <span class="status-badge" id="statusBadge">排队中</span>
-    <p class="meta" id="metaInfo"></p>
-    <div class="pipeline-timeline" id="pipelineTimeline"></div>
-    <button class="btn btn-secondary" id="progressBackBtn" style="margin-top: 1rem;">← 返回初始页面</button>
-  </div>
-  <div class="card hidden" id="resultCard">
-    <h2>✅ 处理完成</h2>
-    <p style="color: #555; margin-bottom: 0.5rem;">音频已生成，点击下方按钮下载：</p>
-    <div class="quality-notice hidden" id="qualityNotice"></div>
-    <div class="result-actions">
-      <button class="btn btn-download" id="downloadBtn">⬇️ 下载 MP3</button>
-      <button class="btn btn-secondary" id="newTaskBtn">← 处理新视频</button>
-    </div>
-    <p style="margin-top: 0.5rem; font-size: 0.8rem; color: #aaa;" id="elapsedFinal"></p>
-  </div>
-  <div class="card hidden" id="errorCard">
-    <h2>❌ 处理失败</h2>
-    <p class="error-msg" id="errorMsg"></p>
-    <button class="btn btn-primary" id="retryBtn" style="margin-top: 1rem;">重新开始</button>
-  </div>
-
-  <!-- 重复视频弹窗 -->
-  <div class="modal-overlay" id="duplicateModal">
-    <div class="modal-box">
-      <h3 id="duplicateTitle">📼 视频已处理过</h3>
-      <p id="duplicateMsg">该视频之前已处理过，是否重新生成？</p>
-      <div class="modal-actions">
-        <button class="btn modal-download" id="modalDownloadBtn">⬇️ 下载已有文件</button>
-        <button class="btn modal-regenerate" id="modalRegenerateBtn">🔄 重新生成</button>
+        <button class="btn btn--secondary" id="errBackBtn">← 返回输入</button>
+        <button class="btn btn--secondary" id="errRetryBtn">🔄 重新处理</button>
       </div>
     </div>
-  </div>
+  </section>
 
-  <!-- 历史记录抽屉 -->
-  <div class="history-overlay" id="historyOverlay">
-    <div class="history-drawer" id="historyDrawer">
-      <div class="history-header">
-        <h3>📋 历史记录</h3>
-        <button class="history-close" id="historyCloseBtn">✕</button>
+</main>
+
+<!-- ============ Settings Drawer ============ -->
+<div class="drawer-overlay" id="settingsOverlay"></div>
+<aside class="drawer" id="settingsDrawer" aria-label="设置" aria-hidden="true">
+  <div class="drawer__head"><h2>⚙️ API 与音色设置</h2><button class="btn btn--icon" data-close="settings">✕</button></div>
+  <div class="drawer__body">
+    <div class="card" style="margin:0 0 18px">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px">🌐 LLM 翻译模型</h3>
+      <div class="field" id="llmKeyField">
+        <label for="llmKey">API Key</label>
+        <div class="key-input">
+          <input type="password" id="llmKey" placeholder="sk-…" autocomplete="off">
+          <button class="btn--icon" id="keyToggle" title="显示/隐藏">👁️</button>
+          <button class="btn--icon" id="keyCopy" title="复制">📋</button>
+        </div>
+        <div class="field__err" id="llmKeyErr" hidden></div>
       </div>
-      <div class="history-list" id="historyList">
-        <div class="history-empty">加载中…</div>
+      <div class="field">
+        <label for="llmBaseUrl">Base URL</label>
+        <input id="llmBaseUrl" placeholder="https://api.deepseek.com" autocomplete="off">
       </div>
-      <div class="history-footer" id="historyFooter"></div>
+      <div class="field">
+        <label for="llmModel">模型</label>
+        <div class="field--shoulder">
+          <select id="llmModel"><option value="">请先查询模型</option></select>
+          <button class="btn btn--secondary" id="fetchModelsBtn">查询模型</button>
+        </div>
+        <div class="hint">点击「查询模型」从你的 API 提供方拉取可用模型</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin:0 0 18px">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px">🔊 TTS 语音合成</h3>
+      <div class="field" id="ttsKeyField">
+        <label for="ttsKey">Fish Audio API Key（留空则使用免费 Edge-TTS）</label>
+        <div class="key-input">
+          <input type="password" id="ttsKey" placeholder="输入 Fish Audio API Key（留空开箱即用）" autocomplete="off">
+          <button class="btn--icon" id="ttsKeyToggle" title="显示/隐藏">👁️</button>
+        </div>
+        <div class="field__err" id="ttsKeyErr" hidden></div>
+        <div class="hint">输入 Fish Audio API Key 启用高拟真音色，留空自动回退至免费 Edge-TTS 语音</div>
+      </div>
+      <div class="field">
+        <label for="ttsBaseUrl">TTS Base URL <span style="font-size:11px;color:var(--text-muted);font-weight:normal">（默认留空即可）</span></label>
+        <input id="ttsBaseUrl" placeholder="https://api.fish.audio/v1" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="ttsModel">TTS 模型 <span style="font-size:11px;color:var(--text-muted);font-weight:normal">（默认留空即可）</span></label>
+        <input id="ttsModel" placeholder="默认 s2.1-pro-free" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="ttsVoice">音色 / Reference ID <span style="font-size:11px;color:var(--text-muted);font-weight:normal">（御姐 / 女大 可选）</span></label>
+        <div class="field--shoulder">
+          <select id="ttsVoice"></select>
+          <button class="btn btn--secondary" id="ttsVoicesBtn">重置预置音色</button>
+          <button class="btn btn--secondary" id="ttsPreviewBtn">🔊 试听</button>
+        </div>
+        <div class="hint">💡 仅需输入 API Key 即可。预置精选“御姐”（默认）与“女大”音色可选；如需使用社区其他声音，可在下拉菜单中选择“输入自定义 Reference ID”。</div>
+      </div>
+      <div class="field">
+        <label for="ttsSpeed" style="display:flex;justify-content:space-between;align-items:center">
+          <span>语速倍率</span>
+          <span id="ttsSpeedVal" style="font-weight:600;color:var(--brand);font-size:13px">1.0x</span>
+        </label>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+          <span style="font-size:12px;color:var(--text-muted)">0.5x</span>
+          <input type="range" id="ttsSpeed" min="0.5" max="2.0" step="0.05" value="1.0" style="flex:1;cursor:pointer">
+          <span style="font-size:12px;color:var(--text-muted)">2.0x</span>
+        </div>
+        <div class="hint">调节语音播报语速（0.5x ~ 2.0x，默认为 1.0x 标准语速）。试听与生成均会应用此语速。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span style="font-size:13.5px;font-weight:600">在此浏览器记住配置</span>
+        <label class="switch"><input type="checkbox" id="rememberSwitch" checked><i></i></label>
+      </div>
+      <div style="margin-top:12px"><button class="btn btn--danger btn--sm" id="clearCfgBtn">清除已保存配置</button></div>
+      <div class="security-banner" style="margin-top:14px">🔒 密钥仅保存在当前浏览器本地（localStorage），绝不上传至任何中心服务器。</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ============ History Drawer ============ -->
+<div class="drawer-overlay" id="historyOverlay"></div>
+<aside class="drawer drawer--wide" id="historyDrawer" aria-label="历史任务" aria-hidden="true">
+  <div class="drawer__head"><h2>📋 历史资产库</h2><button class="btn btn--icon" data-close="history">✕</button></div>
+  <div class="drawer__body" id="historyBody"></div>
+</aside>
+
+<!-- ============ Decision Modal ============ -->
+<div class="modal" id="decisionModal" hidden role="dialog" aria-modal="true" aria-labelledby="dmTitle">
+  <div class="modal__overlay" data-close="decision"></div>
+  <div class="modal__box">
+    <div class="modal__icon" id="dmIcon">⚡</div>
+    <h3 id="dmTitle"></h3>
+    <p id="dmDesc"></p>
+    <div class="modal__actions" id="dmActions"></div>
+  </div>
+</div>
+
+<!-- ============ Confirm Modal ============ -->
+<div class="modal" id="confirmModal" hidden role="dialog" aria-modal="true" aria-labelledby="cfTitle">
+  <div class="modal__overlay" id="cfOverlay"></div>
+  <div class="modal__box">
+    <div class="modal__icon" id="cfIcon">🗑️</div>
+    <h3 id="cfTitle"></h3>
+    <p id="cfDesc"></p>
+    <div class="modal__actions">
+      <button class="btn btn--ghost" id="cfCancel">取消</button>
+      <button class="btn btn--danger" id="cfOk">确认</button>
     </div>
   </div>
 </div>
 
-<script>
-(function () {
-  let pollTimer = null, elapsedTimer = null, videoId = null, currentMode = null, startedAt = null, pollFailures = 0;
-  let sseSource = null, timeline = null;
-
-  const $ = id => document.getElementById(id);
-  const formCard = $('formCard'), progressCard = $('progressCard'), resultCard = $('resultCard'), errorCard = $('errorCard');
-  const submitForm = $('submitForm'), submitBtn = $('submitBtn');
-  const fetchModelsBtn = $('fetchModelsBtn'), fetchVoicesBtn = $('fetchVoicesBtn');
-  const modelSelect = $('modelSelect'), ttsVoice = $('ttsVoice');
-  const statusBadge = $('statusBadge'), metaInfo = $('metaInfo');
-  const pipelineTimeline = $('pipelineTimeline'), progressTitle = $('progressTitle');
-  const downloadBtn = $('downloadBtn'), errorMsg = $('errorMsg'), retryBtn = $('retryBtn');
-  const elapsedFinal = $('elapsedFinal'), newTaskBtn = $('newTaskBtn'), progressBackBtn = $('progressBackBtn');
-  const qualityNotice = $('qualityNotice');
-  const rememberConfig = $('rememberConfig'), clearConfigBtn = $('clearConfigBtn');
-  const CONFIG_STORAGE_KEY = 'v2l_savedConfig_v1';
-
-  const SSE_STAGES = [
-    {id:1,name:'下载',icon:'📥'},{id:2,name:'转写',icon:'🎙️'},{id:3,name:'清洗',icon:'🧹'},
-    {id:4,name:'翻译',icon:'🌐'},{id:5,name:'TTS',icon:'🔊'},{id:6,name:'合并',icon:'🎵'},
-  ];
-
-  function setSelectValue(select, value) {
-    if (!value) return;
-    if (![...select.options].some(option => option.value === value)) {
-      select.add(new Option(value, value));
-    }
-    select.value = value;
-  }
-
-  function collectConfig() {
-    return {
-      llmApiKey: $('llmApiKey').value,
-      llmBaseUrl: $('llmBaseUrl').value,
-      model: modelSelect.value,
-      ttsApiKey: $('ttsApiKey').value,
-      ttsBaseUrl: $('ttsBaseUrl').value,
-      ttsModel: $('ttsModel').value,
-      ttsVoice: ttsVoice.value,
-      mode: document.querySelector('input[name="mode"]:checked')?.value || 'podcast',
-    };
-  }
-
-  function saveConfig() {
-    if (!rememberConfig.checked) return;
-    try { localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(collectConfig())); } catch { /* 浏览器可能禁用存储 */ }
-  }
-
-  function restoreConfig() {
-    try {
-      const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      rememberConfig.checked = true;
-      $('llmApiKey').value = saved.llmApiKey || '';
-      $('llmBaseUrl').value = saved.llmBaseUrl || 'https://api.deepseek.com';
-      setSelectValue(modelSelect, saved.model);
-      $('ttsApiKey').value = saved.ttsApiKey || '';
-      $('ttsBaseUrl').value = saved.ttsBaseUrl || 'https://api.xiaomimimo.com/v1';
-      $('ttsModel').value = saved.ttsModel || 'mimo-v2.5-tts';
-      setSelectValue(ttsVoice, saved.ttsVoice || '苏打');
-      const savedMode = ['podcast', 'faithful', 'condensed'].includes(saved.mode) ? saved.mode : 'podcast';
-      const modeInput = document.querySelector(`input[name="mode"][value="${savedMode}"]`);
-      if (modeInput) modeInput.checked = true;
-    } catch {
-      localStorage.removeItem(CONFIG_STORAGE_KEY);
-    }
-  }
-
-  restoreConfig();
-
-  submitForm.addEventListener('input', saveConfig);
-  submitForm.addEventListener('change', saveConfig);
-  rememberConfig.addEventListener('change', () => {
-    if (rememberConfig.checked) saveConfig();
-    else localStorage.removeItem(CONFIG_STORAGE_KEY);
-  });
-  clearConfigBtn.addEventListener('click', () => {
-    localStorage.removeItem(CONFIG_STORAGE_KEY);
-    rememberConfig.checked = false;
-    clearConfigBtn.textContent = '已清除';
-    setTimeout(() => { clearConfigBtn.textContent = '清除保存'; }, 1200);
-  });
-
-  // 等所有类和函数初始化后再恢复 session，避免刷新时提前访问 PipelineTimeline。
-  const savedVideoId = sessionStorage.getItem('v2l_videoId');
-  const savedMode = sessionStorage.getItem('v2l_mode');
-
-  function formatElapsed(sec) {
-    if (sec < 60) return `${Math.floor(sec)} 秒`;
-    if (sec < 3600) { const m = Math.floor(sec/60), s = Math.floor(sec%60); return s>0 ? `${m}分${s}秒` : `${m}分钟`; }
-    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
-    return m>0 ? `${h}小时${m}分钟` : `${h}小时`;
-  }
-  function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-  // ── PipelineTimeline ────────────────────────────────────────────────
-  class PipelineTimeline {
-    constructor(container) {
-      this.container = container;
-      this.stages = new Map(); // id → {el, dotEl, lineEl, nameEl, metaEl, logEl, actionsEl}
-      this.currentStageId = 0;
-      this._build();
-    }
-
-    _build() {
-      this.container.innerHTML = '';
-      SSE_STAGES.forEach((s, i) => {
-        const node = document.createElement('div');
-        node.className = 'stage-node';
-        node.dataset.stageId = s.id;
-
-        const dot = document.createElement('div');
-        dot.className = 'stage-dot pending';
-
-        const line = document.createElement('div');
-        line.className = 'stage-line';
-        if (i === SSE_STAGES.length - 1) line.style.display = 'none';
-
-        const info = document.createElement('div');
-        info.className = 'stage-info';
-
-        const name = document.createElement('div');
-        name.className = 'stage-name';
-        name.textContent = s.icon + ' ' + s.name;
-
-        const meta = document.createElement('div');
-        meta.className = 'stage-meta';
-        meta.textContent = '等待中';
-
-        info.appendChild(name);
-        info.appendChild(meta);
-
-        const logPanel = document.createElement('div');
-        logPanel.className = 'stage-log-panel';
-
-        const actions = document.createElement('div');
-        actions.className = 'stage-actions';
-
-        node.appendChild(dot);
-        node.appendChild(line);
-        node.appendChild(info);
-        node.appendChild(logPanel);
-        node.appendChild(actions);
-        this.container.appendChild(node);
-
-        this.stages.set(s.id, {
-          el: node, dotEl: dot, lineEl: line, nameEl: name, metaEl: meta,
-          logEl: logPanel, actionsEl: actions, status: 'pending'
-        });
-
-        // Click to toggle log
-        node.addEventListener('click', () => this._toggleLog(s.id));
-      });
-    }
-
-    _toggleLog(id) {
-      const st = this.stages.get(id);
-      if (!st || st.status === 'pending') return;
-      // Collapse all others, toggle this one
-      this.stages.forEach((v, k) => {
-        if (k !== id) v.logEl.classList.remove('expanded');
-      });
-      st.logEl.classList.toggle('expanded');
-      if (st.logEl.classList.contains('expanded')) {
-        st.logEl.scrollTop = st.logEl.scrollHeight;
-      }
-    }
-
-    _setStatus(id, status) {
-      const st = this.stages.get(id);
-      if (!st) return;
-      st.status = status;
-      const els = [st.dotEl, st.nameEl, st.lineEl];
-      els.forEach(el => { el.classList.remove('pending','active','done','reused','failed','cancelled'); el.classList.add(status); });
-    }
-
-    setStageActive(id) {
-      // Mark all previous stages done
-      for (let i = 1; i < id; i++) {
-        if (this.stages.get(i).status === 'pending') {
-          this._setStatus(i, 'done');
-          this.stages.get(i).metaEl.innerHTML = '<span class="duration">✓</span>';
-        }
-      }
-      this._setStatus(id, 'active');
-      this.stages.get(id).metaEl.innerHTML = '<span class="duration">进行中…</span>';
-      this.currentStageId = id;
-      // Auto-expand active stage log
-      this._toggleLog(id);
-      // Show cancel button
-      this._showAction(id, 'cancel');
-    }
-
-    setStageDone(id, durationS, meta) {
-      this._setStatus(id, 'done');
-      const st = this.stages.get(id);
-      const parts = [];
-      if (durationS != null) parts.push(formatElapsed(durationS));
-      if (meta) parts.push(meta);
-      st.metaEl.innerHTML = parts.length ? parts.join(' · ') : '✓';
-      this._clearActions(id);
-    }
-
-    setStageReused(id) {
-      this._setStatus(id, 'reused');
-      const st = this.stages.get(id);
-      st.metaEl.textContent = '复用缓存';
-      this._clearActions(id);
-    }
-
-    setStageFailed(id, message) {
-      this._setStatus(id, 'failed');
-      const st = this.stages.get(id);
-      st.metaEl.innerHTML = '失败';
-      st.metaEl.style.color = '#dc2626';
-      this.addLogEntry(id, '❌ ' + (message || '未知错误'));
-      st.logEl.classList.add('expanded');
-      st.logEl.scrollTop = st.logEl.scrollHeight;
-      // Show retry button
-      this._showAction(id, 'retry');
-    }
-
-    setStageCancelled(id) {
-      // Mark current active stage + all subsequent as cancelled
-      for (let i = id; i <= SSE_STAGES.length; i++) {
-        this._setStatus(i, 'cancelled');
-        const st = this.stages.get(i);
-        if (st && st.status === 'cancelled') {
-          st.metaEl.innerHTML = i === id ? '已取消' : '';
-        }
-      }
-      this._clearActions(id);
-    }
-
-    setStageProgress(id, message, pct) {
-      const st = this.stages.get(id);
-      if (!st) return;
-      const pctStr = pct != null ? ` (${pct}%)` : '';
-      st.metaEl.innerHTML = `<span class="duration">${escHtml(message)}${pctStr}</span>`;
-    }
-
-    addLogEntry(id, message) {
-      const st = this.stages.get(id || this.currentStageId);
-      if (!st) return;
-      const entry = document.createElement('div');
-      entry.className = 'log-entry';
-      entry.textContent = message;
-      st.logEl.appendChild(entry);
-      if (st.logEl.classList.contains('expanded')) {
-        st.logEl.scrollTop = st.logEl.scrollHeight;
-      }
-      // Limit to 50 entries
-      while (st.logEl.children.length > 50) st.logEl.firstChild.remove();
-    }
-
-    _showAction(id, type) {
-      const st = this.stages.get(id);
-      if (!st) return;
-      st.actionsEl.innerHTML = '';
-      const btn = document.createElement('button');
-      btn.className = 'stage-btn';
-      if (type === 'cancel') {
-        btn.className += ' cancel-btn';
-        btn.textContent = '⏹ 取消';
-        btn.onclick = (e) => { e.stopPropagation(); cancelTask(); };
-        btn.id = 'cancelStageBtn';
-      } else if (type === 'retry') {
-        btn.className += ' retry-btn';
-        btn.textContent = '🔄 从此阶段重试';
-        btn.onclick = (e) => { e.stopPropagation(); retryFromStage(id); };
-      }
-      st.actionsEl.appendChild(btn);
-    }
-
-    _clearActions(id) {
-      const st = this.stages.get(id);
-      if (st) st.actionsEl.innerHTML = '';
-    }
-
-    clearAllActions() {
-      this.stages.forEach(st => { st.actionsEl.innerHTML = ''; });
-    }
-
-    updateFromPoll(stagesArray) {
-      if (!stagesArray) return;
-      stagesArray.forEach(s => {
-        const st = this.stages.get(s.stage_id);
-        if (!st) return;
-        switch (s.status) {
-          case 'active':
-            if (st.status !== 'active') this.setStageActive(s.stage_id);
-            this.currentStageId = s.stage_id;
-            {
-              const parts = [];
-              if (s.meta) parts.push(s.meta);
-              if (s.duration_s != null) parts.push(formatElapsed(s.duration_s));
-              if (parts.length) st.metaEl.textContent = parts.join(' · ');
-            }
-            break;
-          case 'done':
-            this.setStageDone(s.stage_id, s.duration_s, s.meta);
-            break;
-          case 'reused':
-            this.setStageReused(s.stage_id);
-            break;
-          case 'failed':
-            if (st.status !== 'failed') this.setStageFailed(s.stage_id, s.message);
-            break;
-          case 'cancelled':
-            this._setStatus(s.stage_id, 'cancelled');
-            this._clearActions(s.stage_id);
-            break;
-        }
-      });
-    }
-
-    destroy() {
-      this.container.innerHTML = '';
-      this.stages.clear();
-    }
-  }
-
-  // ── SSE client ──────────────────────────────────────────────────────
-  function startSSE(vid, mode) {
-    if (sseSource) { sseSource.close(); sseSource = null; }
-    if (typeof EventSource === 'undefined') {
-      // 浏览器不支持 SSE → 降级到轮询
-      startPolling();
-      return;
-    }
-    try {
-      sseSource = new EventSource('/api/status/' + vid + '/' + mode + '/stream');
-
-      sseSource.addEventListener('state_snapshot', (e) => {
-        const state = JSON.parse(e.data);
-        if (state.stages && timeline) timeline.updateFromPoll(state.stages);
-        updateUI(state);
-      });
-
-      sseSource.addEventListener('stage_change', (e) => {
-        const d = JSON.parse(e.data);
-        if (d.status === 'active') timeline.setStageActive(d.stage_id);
-        else if (d.status === 'done') timeline.setStageDone(d.stage_id, d.duration_s, d.meta);
-        else if (d.status === 'reused') timeline.setStageReused(d.stage_id);
-        else if (d.status === 'failed') timeline.setStageFailed(d.stage_id, d.message);
-      });
-
-      sseSource.addEventListener('stage_progress', (e) => {
-        const d = JSON.parse(e.data);
-        timeline.setStageProgress(d.stage_id, d.message, d.pct);
-      });
-
-      sseSource.addEventListener('translation_phase', (e) => {
-        const d = JSON.parse(e.data);
-        const suffix = d.total ? ` (${d.current || 0}/${d.total})` : '';
-        timeline.setStageProgress(4, `${d.label || '翻译'}${suffix}`);
-      });
-
-      sseSource.addEventListener('log', (e) => {
-        const d = JSON.parse(e.data);
-        timeline.addLogEntry(d.stage_id, d.message);
-      });
-
-      sseSource.addEventListener('pipeline_complete', (e) => {
-        const d = JSON.parse(e.data);
-        stopPolling(); sseSource.close(); sseSource = null;
-        // 所有阶段标记完成
-        SSE_STAGES.forEach(s => {
-          if (timeline.stages.get(s.id)?.status !== 'reused') timeline.setStageDone(s.id);
-        });
-        timeline.clearAllActions();
-        onPipelineDone(d);
-      });
-
-      sseSource.addEventListener('pipeline_error', (e) => {
-        const d = JSON.parse(e.data);
-        stopPolling(); sseSource.close(); sseSource = null;
-        timeline.setStageFailed(d.stage_id || timeline.currentStageId, d.message);
-        showError(d.message || '处理失败');
-      });
-
-      sseSource.addEventListener('pipeline_cancelled', (e) => {
-        const d = JSON.parse(e.data);
-        stopPolling(); sseSource.close(); sseSource = null;
-        const sid = timeline.currentStageId || 1;
-        timeline.setStageCancelled(sid);
-        statusBadge.textContent = '已取消'; statusBadge.className = 'status-badge status-failed';
-        progressTitle.textContent = '⏹ 已取消';
-        document.title = '[✗] video2listener';
-        sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
-      });
-
-      sseSource.onerror = () => {
-        // SSE 连接失败 → 降级到轮询
-        if (sseSource) { sseSource.close(); sseSource = null; }
-        if (!pollTimer) startPolling();
-      };
-    } catch (_) {
-      // EventSource 构造失败 → 降级到轮询
-      startPolling();
-    }
-  }
-
-  function onPipelineDone(d) {
-    const doneState = { status: 'done', output_path: d.output_path, completed_at: Date.now() / 1000,
-      audit_status: d.audit_status, audit_message: d.audit_message };
-    if (d.title) document.title = '[✓] ' + d.title + ' · video2listener';
-    else document.title = '[✓] video2listener';
-    // 系统通知
-    fireNotification(d.title || '视频', d.video_id);
-    updateUI(doneState);
-  }
-
-  function fireNotification(title, vid) {
-    if (!('Notification' in window)) return;
-    if (Notification.permission === 'granted') {
-      try {
-        const n = new Notification('✅ 视频已生成', { body: '《' + title + '》已生成，点击下载', tag: vid });
-        n.onclick = () => { window.focus(); if (downloadBtn) downloadBtn.scrollIntoView(); n.close(); };
-      } catch (_) {}
-    }
-  }
-
-  function requestNotificationPermission() {
-    if (!('Notification' in window)) return;
-    if (Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }
-
-  async function cancelTask() {
-    if (!videoId) return;
-    const btn = document.getElementById('cancelStageBtn');
-    if (btn) { btn.disabled = true; btn.textContent = '取消中…'; }
-    try {
-      await fetch('/api/cancel/' + videoId + '/' + currentMode, { method: 'POST' });
-    } catch (_) {
-      if (btn) { btn.disabled = false; btn.textContent = '⏹ 取消'; }
-    }
-  }
-
-  function retryFromStage(stageId) {
-    // Map stage_id back to resume_from string
-    const resumeMap = { 3: 'metadata_fetched', 4: 'text_ready', 5: 'translated' };
-    // Submit with force + resume_from (handled in U4)
-    returnToForm(false);
-    setTimeout(() => submitTask('regenerate_variant'), 100);
-    // Store resume_from for next submit
-    sessionStorage.setItem('v2l_resumeFrom', resumeMap[stageId] || '');
-  }
-
-  // ── 查询 LLM 模型 ──────────────────────────────────────────────────
-  fetchModelsBtn.addEventListener('click', async () => {
-    const apiKey = $('llmApiKey').value.trim();
-    const baseUrl = $('llmBaseUrl').value.trim() || 'https://api.deepseek.com';
-    const preferredModel = modelSelect.value;
-    if (!apiKey) { alert('请先输入 LLM API Key'); return; }
-    fetchModelsBtn.disabled = true; fetchModelsBtn.textContent = '查询中…';
-    modelSelect.innerHTML = '<option value="">查询中…</option>';
-    try {
-      const resp = await fetch('/api/models', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key:apiKey, base_url:baseUrl}) });
-      const data = await resp.json();
-      if (!resp.ok) { modelSelect.innerHTML = `<option value="">❌ ${data.error||'查询失败'}</option>`; }
-      else if ((data.models||[]).length===0) { modelSelect.innerHTML = '<option value="">未找到模型</option>'; }
-      else {
-        modelSelect.innerHTML = data.models.map(m => `<option value="${escHtml(m.id)}">${escHtml(m.id)}</option>`).join('');
-        if ([...modelSelect.options].some(option => option.value === preferredModel)) modelSelect.value = preferredModel;
-        saveConfig();
-      }
-    } catch { modelSelect.innerHTML = '<option value="">❌ 网络错误</option>'; }
-    finally { fetchModelsBtn.disabled = false; fetchModelsBtn.textContent = '查询模型'; }
-  });
-
-  // ── 查询 TTS 音色 ──────────────────────────────────────────────────
-  fetchVoicesBtn.addEventListener('click', async () => {
-    const apiKey = $('ttsApiKey').value.trim();
-    const baseUrl = $('ttsBaseUrl').value.trim() || 'https://api.xiaomimimo.com/v1';
-    const preferredVoice = ttsVoice.value || '苏打';
-    fetchVoicesBtn.disabled = true; fetchVoicesBtn.textContent = '查询中…';
-    ttsVoice.innerHTML = '<option value="">查询中…</option>';
-    try {
-      const resp = await fetch('/api/tts-voices', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api_key:apiKey, base_url:baseUrl}) });
-      const data = await resp.json();
-      if (!resp.ok) { ttsVoice.innerHTML = `<option value="">❌ ${data.error||'查询失败'}</option>`; }
-      else {
-        const voices = data.voices || [];
-        if (voices.length===0) { ttsVoice.innerHTML = '<option value="">未找到音色</option>'; }
-        else {
-          ttsVoice.innerHTML = voices.map(v => {
-            const sel = v.id===preferredVoice ? ' selected' : '';
-            return `<option value="${escHtml(v.id)}"${sel}>${escHtml(v.name||v.id)}</option>`;
-          }).join('');
-          if (![...ttsVoice.options].some(option => option.value === preferredVoice)) ttsVoice.value = '苏打';
-          saveConfig();
-        }
-      }
-    } catch { ttsVoice.innerHTML = '<option value="">❌ 网络错误</option>'; }
-    finally { fetchVoicesBtn.disabled = false; fetchVoicesBtn.textContent = '加载官方音色'; }
-  });
-
-  // ── Key field UX: toggle / copy / tooltip ──────────────────────────
-  document.querySelectorAll('.key-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const input = document.getElementById(btn.dataset.target);
-      if (!input) return;
-      const isPass = input.type === 'password';
-      input.type = isPass ? 'text' : 'password';
-      btn.textContent = isPass ? '🙈' : '👁️';
-    });
-  });
-
-  document.querySelectorAll('.key-copy').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const input = document.getElementById(btn.dataset.target);
-      if (!input) return;
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(input.value);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = input.value; ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-        }
-        btn.textContent = '✓';
-        setTimeout(() => { btn.textContent = '📋'; }, 1200);
-      } catch (_) { /* clipboard denied */ }
-    });
-  });
-
-  document.querySelectorAll('.help-icon').forEach(icon => {
-    icon.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const helpId = 'help-' + icon.dataset.help;
-      const tooltip = document.getElementById(helpId);
-      if (!tooltip) return;
-      const wasOpen = tooltip.classList.contains('show');
-      // Close all tooltips
-      document.querySelectorAll('.help-tooltip.show').forEach(t => t.classList.remove('show'));
-      if (!wasOpen) tooltip.classList.add('show');
-    });
-  });
-
-  document.addEventListener('click', () => {
-    document.querySelectorAll('.help-tooltip.show').forEach(t => t.classList.remove('show'));
-  });
-
-  // ── TTS Preview ─────────────────────────────────────────────────────
-  const previewTtsBtn = $('previewTtsBtn');
-  let _previewAudio = null;
-
-  previewTtsBtn.addEventListener('click', async () => {
-    if (_previewAudio) { _previewAudio.pause(); _previewAudio = null; }
-    previewTtsBtn.disabled = true;
-    previewTtsBtn.textContent = '播放中…';
-
-    const apiKey = $('ttsApiKey').value.trim();
-    const baseUrl = $('ttsBaseUrl').value.trim();
-    const provider = apiKey ? 'mimi' : 'edge';
-    const voice = ttsVoice.value || '苏打';
-    const model = $('ttsModel').value.trim();
-
-    try {
-      const resp = await fetch('/api/tts-preview', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, voice, api_key: apiKey, base_url: baseUrl, model }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json();
-        throw new Error(err.error || 'TTS 试听失败');
-      }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      _previewAudio = new Audio(url);
-      _previewAudio.onended = () => {
-        previewTtsBtn.disabled = false;
-        previewTtsBtn.textContent = '🔊 试听';
-        _previewAudio = null;
-      };
-      _previewAudio.onerror = () => {
-        previewTtsBtn.disabled = false;
-        previewTtsBtn.textContent = '试听失败';
-        _previewAudio = null;
-        setTimeout(() => { if (previewTtsBtn.textContent === '试听失败') previewTtsBtn.textContent = '🔊 试听'; }, 2000);
-      };
-      _previewAudio.play();
-    } catch (err) {
-      previewTtsBtn.disabled = false;
-      previewTtsBtn.textContent = '试听失败';
-      setTimeout(() => { if (previewTtsBtn.textContent === '试听失败') previewTtsBtn.textContent = '🔊 试听'; }, 2000);
-    }
-  });
-
-  // ── 轮询（降级用） ─────────────────────────────────────────────────
-  function markConnectionInterrupted(message) {
-    pollFailures++;
-    progressTitle.textContent = '🔄 连接暂时中断，正在重试';
-    statusBadge.textContent = '重新连接中…';
-    statusBadge.className = 'status-badge status-queued';
-    if (timeline && pollFailures === 1) {
-      timeline.addLogEntry(timeline.currentStageId, message || '连接暂时中断，正在自动重试…');
-    }
-  }
-
-  async function pollStatus() {
-    try {
-      const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
-      if (resp.status === 404) { returnToForm(false); return; }
-      if (!resp.ok) { markConnectionInterrupted('服务暂时不可用，正在自动重试…'); return; }
-      const hadFailures = pollFailures > 0;
-      pollFailures = 0;
-      const state = await resp.json();
-      if (hadFailures && timeline) {
-        timeline.addLogEntry(timeline.currentStageId, '连接已恢复');
-      }
-      // 用 stages 数组驱动时间线
-      if (state.stages && timeline) timeline.updateFromPoll(state.stages);
-      updateUI(state);
-    } catch { markConnectionInterrupted('网络暂时不可用，正在自动重试…'); }
-  }
-  function startPolling() {
-    if (pollTimer) return;
-    pollStatus(); pollTimer = setInterval(pollStatus, 2000);
-    if (startedAt) { updateElapsed(); elapsedTimer = setInterval(updateElapsed, 5000); }
-  }
-  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer=null; } if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer=null; } }
-
-  function updateElapsed() { if (!startedAt) return; metaInfo.textContent = `⏱️ 已用 ${formatElapsed((Date.now()/1000)-startedAt)}`; }
-
-  function updateUI(state) {
-    if (state.translation_phase && timeline) {
-      const p = state.translation_phase;
-      const suffix = p.total ? ` (${p.current || 0}/${p.total})` : '';
-      timeline.setStageProgress(4, `${p.label || '翻译'}${suffix}`);
-    }
-    statusBadge.textContent = state.status==='queued'?'排队中…':state.status==='processing'?'处理中…':state.status==='done'?'已完成':state.status==='failed'?'失败':state.status;
-    statusBadge.className = 'status-badge status-'+state.status;
-    progressTitle.textContent = state.status==='processing'?'⏳ 处理中':state.status==='done'?'✅ 完成':state.status==='failed'?'❌ 失败':'⏳ 处理中';
-    const parts = []; if (state.mode_label) parts.push(state.mode_label); if (state.video_id) parts.push(state.video_id);
-    metaInfo.textContent = parts.join(' · ')+'  ';
-    if (state.status==='done') {
-      stopPolling();
-      if (sseSource) { sseSource.close(); sseSource = null; }
-      if (timeline) timeline.clearAllActions();
-      resultCard.classList.remove('hidden');
-      qualityNotice.className = 'quality-notice hidden';
-      qualityNotice.textContent = '';
-      if (state.audit_status === 'degraded') {
-        qualityNotice.className = 'quality-notice degraded';
-        qualityNotice.textContent = '⚠️ ' + (state.audit_message || '质量审计降级：音频可下载，但语义审计未完整完成');
-      } else if (state.audit_status === 'passed') {
-        qualityNotice.className = 'quality-notice passed';
-        qualityNotice.textContent = '✅ 忠实翻译质量审计完全通过';
-      }
-      if (startedAt) { const sec=(state.completed_at||Date.now()/1000)-startedAt; elapsedFinal.textContent=`总耗时: ${formatElapsed(sec)}`; }
-      downloadBtn.onclick=()=>{window.location.href=`/api/download/${videoId}/${currentMode}`;};
-      sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
-      if (!state.summary_path) startSummaryPolling();
-    }
-    if (state.status==='failed') {
-      stopPolling();
-      if (sseSource) { sseSource.close(); sseSource = null; }
-      showError(state.error_message||'未知错误');
-    }
-  }
-  function showError(msg) {
-    errorCard.classList.remove('hidden'); errorMsg.textContent=msg;
-    document.title = '[✗] video2listener';
-    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
-  }
-
-  let summaryPollTimer = null;
-  let summaryPollStart = 0;
-  function startSummaryPolling() {
-    if (summaryPollTimer) return;
-    summaryPollStart = Date.now();
-    summaryPollTimer = setInterval(async () => {
-      try {
-        const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
-        if (!resp.ok) return;
-        const state = await resp.json();
-        if (state.summary_path) {
-          clearInterval(summaryPollTimer);
-          summaryPollTimer = null;
-          // 摘要已在后台生成，刷新历史面板即可展示
-          return;
-        }
-        if (Date.now() - summaryPollStart > 30000) {
-          clearInterval(summaryPollTimer);
-          summaryPollTimer = null;
-        }
-      } catch {}
-    }, 2000);
-  }
-
-  function returnToForm(clearUrl) {
-    stopPolling();
-    if (sseSource) { sseSource.close(); sseSource = null; }
-    if (timeline) { timeline.destroy(); timeline = null; }
-    formCard.classList.remove('hidden');
-    progressCard.classList.add('hidden');
-    resultCard.classList.add('hidden');
-    errorCard.classList.add('hidden');
-    submitBtn.disabled=false; submitBtn.textContent='开始处理';
-    errorMsg.textContent=''; elapsedFinal.textContent='';
-    if (clearUrl) $('url').value='';
-    videoId=null; currentMode=null; startedAt=null; pollFailures=0;
-    document.title = 'video2listener — YouTube 转中文 MP3 播客';
-    sessionStorage.removeItem('v2l_videoId'); sessionStorage.removeItem('v2l_mode'); sessionStorage.removeItem('v2l_startedAt');
-    $('url').focus();
-  }
-
-  async function restoreTaskSession(savedId, savedTaskMode) {
-    videoId = savedId;
-    currentMode = savedTaskMode || document.querySelector('input[name="mode"]:checked')?.value || 'podcast';
-    const taskModeInput = document.querySelector(`input[name="mode"][value="${currentMode}"]`);
-    if (taskModeInput) taskModeInput.checked = true;
-    startedAt = parseFloat(sessionStorage.getItem('v2l_startedAt') || '0');
-    formCard.classList.add('hidden');
-    resultCard.classList.add('hidden');
-    errorCard.classList.add('hidden');
-    progressCard.classList.remove('hidden');
-    timeline = new PipelineTimeline(pipelineTimeline);
-
-    try {
-      const resp = await fetch(`/api/status/${videoId}/${currentMode}`);
-      if (!resp.ok) { returnToForm(false); return; }
-      const state = await resp.json();
-      if (state.stages) timeline.updateFromPoll(state.stages);
-      updateUI(state);
-      if (state.status === 'queued' || state.status === 'processing') {
-        startSSE(videoId, currentMode);
-        // SSE 不重放刷新前事件；轮询负责恢复当前状态并防止页面卡住。
-        startPolling();
-      }
-    } catch (_) {
-      returnToForm(false);
-    }
-  }
-
-  // ── 提交 ────────────────────────────────────────────────────────────
-  // ── 客户端校验 ──────────────────────────────────────────────────────
-  function clearFieldErrors() {
-    document.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
-    document.querySelectorAll('.err-msg').forEach(el => el.remove());
-  }
-
-  function showFieldError(fieldId, msg) {
-    const field = $(fieldId);
-    if (!field) return;
-    const group = field.closest('.form-group');
-    if (!group) return;
-    group.classList.add('field-error');
-    const err = document.createElement('div');
-    err.className = 'err-msg';
-    err.textContent = msg;
-    group.appendChild(err);
-  }
-
-  function validateForm() {
-    clearFieldErrors();
-    const errors = [];
-
-    // URL 格式校验
-    const url = $('url').value.trim();
-    if (!url) {
-      showFieldError('url', '请输入 YouTube 链接');
-      errors.push('url');
-    } else {
-      const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/i;
-      const idPattern = /^[\w-]{11}$/;
-      if (!ytPattern.test(url) && !idPattern.test(url)) {
-        showFieldError('url', '链接格式无效。支持: youtube.com/watch?v=xxx / youtu.be/xxx / 纯视频 ID');
-        errors.push('url');
-      }
-    }
-
-    // LLM API Key 校验
-    const apiKey = $('llmApiKey').value.trim();
-    if (!apiKey) {
-      showFieldError('llmApiKey', '请输入 LLM API Key（翻译需要）');
-      errors.push('llmApiKey');
-    }
-
-    // 模型校验
-    if (!modelSelect.value) {
-      showFieldError('modelSelect', '请先点击「查询模型」获取可用模型列表');
-      errors.push('modelSelect');
-    }
-
-    // 聚焦第一个错误字段
-    if (errors.length > 0) {
-      $(errors[0]).focus();
-      return false;
-    }
-    return true;
-  }
-
-  submitForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!validateForm()) return;
-    submitTask('');
-  });
-
-  async function submitTask(action) {
-    const url = $('url').value.trim();
-    const mode = document.querySelector('input[name="mode"]:checked')?.value||'podcast';
-    if (!url) { alert('请输入 YouTube 链接'); return; }
-    saveConfig();
-    submitBtn.disabled=true; submitBtn.textContent='提交中…';
-    try {
-      const resp = await fetch('/api/process', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          url, mode, action: action || '',
-          resume_from: sessionStorage.getItem('v2l_resumeFrom') || '',
-          api_key: $('llmApiKey').value.trim(),
-          base_url: $('llmBaseUrl').value.trim(),
-          model: modelSelect.value,
-          tts_api_key: $('ttsApiKey').value.trim(),
-          tts_base_url: $('ttsBaseUrl').value.trim(),
-          tts_model: $('ttsModel').value.trim(),
-          tts_voice: ttsVoice.value,
-        }),
-      });
-      const data = await resp.json();
-      if (resp.status === 409 && (data.status === 'queued' || data.status === 'processing')) {
-        submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        sessionStorage.setItem('v2l_videoId', data.video_id);
-        sessionStorage.setItem('v2l_mode', data.mode);
-        sessionStorage.setItem('v2l_startedAt', String(data.started_at || Date.now()/1000));
-        await restoreTaskSession(data.video_id, data.mode);
-        if (timeline) timeline.addLogEntry(timeline.currentStageId || 1, 'ℹ️ ' + (data.message || '已恢复正在处理的任务'));
-        return;
-      }
-      if (resp.ok && (data.status === 'variant_exists' || data.status === 'reuse_available')) {
-        submitBtn.disabled=false; submitBtn.textContent='开始处理';
-        showDecisionModal(data);
-        return;
-      }
-      if (!resp.ok) { showError(data.error||data.message||'提交失败'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; return; }
-      requestNotificationPermission();
-      startProgressUI(data);
-    } catch { showError('网络异常，请检查服务是否运行'); submitBtn.disabled=false; submitBtn.textContent='开始处理'; }
-  }
-
-  function startProgressUI(data) {
-    videoId=data.video_id; currentMode=data.mode; startedAt=Date.now()/1000;
-    sessionStorage.setItem('v2l_videoId',videoId); sessionStorage.setItem('v2l_mode',currentMode); sessionStorage.setItem('v2l_startedAt',String(startedAt));
-    formCard.classList.add('hidden'); resultCard.classList.add('hidden'); errorCard.classList.add('hidden');
-    progressCard.classList.remove('hidden');
-    statusBadge.textContent='排队中…'; statusBadge.className='status-badge status-queued';
-    progressTitle.textContent='⏳ 处理中';
-    metaInfo.textContent=(data.mode_label||'')+' · '+videoId;
-
-    // 初始化时间线
-    timeline = new PipelineTimeline(pipelineTimeline);
-    document.title = '[●●●] video2listener';
-
-    // SSE 优先，降级到轮询
-    startSSE(videoId, currentMode);
-    // 清除 retry 标记
-    sessionStorage.removeItem('v2l_resumeFrom');
-  }
-
-  newTaskBtn.addEventListener('click', () => returnToForm(true));
-  retryBtn.addEventListener('click', () => returnToForm(false));
-  progressBackBtn.addEventListener('click', () => returnToForm(false));
-
-  // ── 重复视频弹窗 ────────────────────────────────────────────────────
-  const duplicateModal = $('duplicateModal');
-  const duplicateTitle = $('duplicateTitle');
-  const duplicateMsg = $('duplicateMsg');
-  const modalDownloadBtn = $('modalDownloadBtn');
-  const modalRegenerateBtn = $('modalRegenerateBtn');
-  let _modalKind = 'variant_exists';
-  let _duplicateOutputPath = '';
-
-  function showDecisionModal(data) {
-    const labels = { podcast: '中文播客版', faithful: '忠实翻译版', condensed: '精华浓缩版' };
-    _modalKind = data.status;
-    videoId = data.video_id;
-    currentMode = data.mode;
-    duplicateMsg.textContent = data.message || '';
-    _duplicateOutputPath = data.output_path || '';
-    if (_modalKind === 'reuse_available') {
-      duplicateTitle.textContent = '♻️ 复用已有素材';
-      modalDownloadBtn.textContent = '取消';
-      modalRegenerateBtn.textContent = '生成' + (labels[currentMode] || currentMode);
-      modalRegenerateBtn.focus();
-    } else {
-      duplicateTitle.textContent = '📼 此模式已生成';
-      modalDownloadBtn.textContent = _duplicateOutputPath ? '⬇️ 下载已有文件' : '取消';
-      modalRegenerateBtn.textContent = '🔄 重新生成此模式';
-      modalDownloadBtn.focus();
-    }
-    duplicateModal.classList.add('open');
-  }
-
-  function closeDuplicateModal() {
-    duplicateModal.classList.remove('open');
-    _duplicateOutputPath = '';
-  }
-
-  modalDownloadBtn.addEventListener('click', () => {
-    if (_modalKind === 'variant_exists' && _duplicateOutputPath) {
-      window.location.href = '/api/download/' + videoId + '/' + currentMode;
-    }
-    closeDuplicateModal();
-  });
-
-  modalRegenerateBtn.addEventListener('click', () => {
-    const action = _modalKind === 'reuse_available' ? 'create_variant' : 'regenerate_variant';
-    closeDuplicateModal();
-    submitTask(action);
-  });
-
-  // 点击遮罩关闭
-  duplicateModal.addEventListener('click', (e) => {
-    if (e.target === duplicateModal) closeDuplicateModal();
-  });
-
-  // 键盘支持
-  document.addEventListener('keydown', (e) => {
-    if (duplicateModal.classList.contains('open')) {
-      if (e.key === 'Escape') { e.preventDefault(); closeDuplicateModal(); }
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        (_modalKind === 'reuse_available' ? modalRegenerateBtn : modalDownloadBtn).click();
-      }
-    }
-    if (historyOverlay.classList.contains('open')) {
-      if (e.key === 'Escape') { e.preventDefault(); closeHistoryDrawer(); }
-    }
-  });
-
-  // ── 历史记录抽屉 ────────────────────────────────────────────────────
-  const historyBtn = $('historyBtn');
-  const historyOverlay = $('historyOverlay');
-  const historyDrawer = $('historyDrawer');
-  const historyList = $('historyList');
-  const historyFooter = $('historyFooter');
-  const historyCloseBtn = $('historyCloseBtn');
-  let _historyCache = [];
-
-  async function openHistoryDrawer() {
-    historyOverlay.classList.add('open');
-    historyList.innerHTML = '<div class="history-empty">加载中…</div>';
-    try {
-      const resp = await fetch('/api/tasks');
-      if (!resp.ok) throw new Error('Failed');
-      _historyCache = await resp.json();
-      renderHistoryList(_historyCache);
-    } catch (_) {
-      historyList.innerHTML = '<div class="history-empty">加载失败，请重试</div>';
-    }
-  }
-
-  function closeHistoryDrawer() {
-    historyOverlay.classList.remove('open');
-  }
-
-  function renderHistoryList(tasks) {
-    historyList.innerHTML = '';
-    if (tasks.length === 0) {
-      historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
-      historyFooter.textContent = '';
-      return;
-    }
-    historyFooter.textContent = `共 ${tasks.length} 条记录`;
-
-    const MODE_CLASS = { podcast: 'badge-podcast', faithful: 'badge-faithful', condensed: 'badge-condensed' };
-    const STATUS_CLASS = { done: 'status-dot-done', failed: 'status-dot-failed', cancelled: 'status-dot-cancelled', processing: 'status-dot-processing', queued: 'status-dot-processing' };
-
-    tasks.forEach(t => {
-      const row = document.createElement('div');
-      row.className = 'task-row';
-      row.dataset.videoId = t.video_id;
-
-      const dateStr = (t.updated_at || '').slice(0, 10);
-      const title = t.title_original || t.video_id;
-      const titleShort = title.length > 40 ? title.slice(0, 40) + '…' : title;
-      const statusDot = STATUS_CLASS[t.status] || 'status-dot-done';
-      const variants = t.variants || [];
-      const modeBadges = variants.map(v =>
-        `<span class="task-row-badge ${MODE_CLASS[v.mode] || ''}">${escHtml(v.mode_label || v.mode)}</span>`
-      ).join('');
-
-      // Estimate file size from duration
-      const estMB = t.duration_seconds ? Math.round(t.duration_seconds * 128 / 8 / 1024) : '?';
-      const variantRowsHTML = variants.length ? variants.map(v => {
-        const quality = v.audit_status === 'degraded'
-          ? '<span class="quality-chip">质量审计降级</span>'
-          : (v.audit_status === 'passed' ? '<span style="font-size:.7rem;color:#166534;margin-left:.35rem;">审计通过</span>' : '');
-        const files = v.parts && v.parts.length
-          ? v.parts.map(p => `<a href="${escHtml(p.download_url || v.download_url)}" style="color:#4f46e5;">📥 ${escHtml(p.filename)}</a>`).join(' · ')
-          : (v.audio_zh_path ? `<a href="${escHtml(v.download_url)}" style="color:#4f46e5;">📥 下载 MP3</a>` : '<span style="color:#9ca3af;">未生成</span>');
-        return `<div style="padding:.45rem 0;border-top:1px solid #eee;">
-          <span class="task-row-badge ${MODE_CLASS[v.mode] || ''}">${escHtml(v.mode_label || v.mode)}</span>
-          <span style="font-size:.75rem;color:#6b7280;">${escHtml(v.status)}</span>
-          ${quality}
-          <span>${files}</span>
-          <button class="stage-btn variant-delete" data-mode="${escHtml(v.mode)}" style="font-size:.7rem;padding:.15rem .45rem;color:#dc2626;">删除此模式</button>
-        </div>`;
-      }).join('') : '<span style="color:#9ca3af;">暂无模式输出</span>';
-
-      row.innerHTML = `
-        <div class="task-row-main">
-          <span class="task-row-status ${statusDot}"></span>
-          <span class="task-row-title" title="${escHtml(title)}">${escHtml(titleShort)}</span>
-          ${modeBadges}
-          <span style="font-size:0.72rem;color:#9ca3af;">${dateStr}</span>
-          <div class="task-row-actions">
-            ${variants.some(v => v.audio_zh_path) ? '<button class="task-row-icon" title="下载最近模式">⬇️</button>' : ''}
-            <button class="task-row-icon del" title="删除">🗑️</button>
-          </div>
-        </div>
-        <div class="task-row-detail">
-          <span>📺 ${escHtml(t.channel_name || '未知频道')}</span>
-          <span>⏱ ${t.duration_seconds ? Math.floor(t.duration_seconds/60)+' 分钟' : '未知'}</span>
-          <span>📦 约 ${estMB} MB</span>
-          <span style="width:100%;">${variantRowsHTML}</span>
-        </div>
-        <div class="task-row-confirm">
-          <span style="font-size:0.8rem;color:#dc2626;">删除整个视频及全部模式记录？</span>
-          <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;color:#dc2626;">确认</button>
-          <button class="stage-btn" style="font-size:0.72rem;padding:0.2rem 0.5rem;">取消</button>
-        </div>
-      `;
-
-      // Click row → toggle expand
-      row.querySelector('.task-row-main').addEventListener('click', () => {
-        row.classList.toggle('expanded');
-      });
-
-      // Download button
-      const dlBtn = row.querySelector('.task-row-icon:not(.del)');
-      if (dlBtn) {
-        dlBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const latest = variants.find(v => v.audio_zh_path);
-          if (latest) window.location.href = latest.download_url;
-        });
-      }
-
-      row.querySelectorAll('.variant-delete').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (!confirm(`确认删除${btn.dataset.mode}模式？其他模式和共享素材会保留。`)) return;
-          const resp = await fetch('/api/tasks/' + t.video_id + '/' + btn.dataset.mode, { method: 'DELETE' });
-          if (!resp.ok) {
-            const err = await resp.json();
-            alert('删除失败: ' + (err.error || '未知错误'));
-            return;
-          }
-          openHistoryDrawer();
-        });
-      });
-
-      // Delete button → show confirm
-      const delBtn = row.querySelector('.task-row-icon.del');
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        row.classList.add('confirming');
-      });
-
-      // Confirm delete
-      const confirmBtns = row.querySelectorAll('.task-row-confirm button');
-      confirmBtns[0].addEventListener('click', async (e) => {
-        e.stopPropagation();
-        try {
-          const resp = await fetch('/api/tasks/' + t.video_id, { method: 'DELETE' });
-          if (resp.ok) {
-            row.classList.add('task-row-fade');
-            setTimeout(() => {
-              row.remove();
-              _historyCache = _historyCache.filter(x => x.video_id !== t.video_id);
-              historyFooter.textContent = `共 ${_historyCache.length} 条记录`;
-              if (_historyCache.length === 0) {
-                historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
-              }
-            }, 300);
-          } else {
-            const err = await resp.json();
-            alert('删除失败: ' + (err.error || '未知错误'));
-            row.classList.remove('confirming');
-          }
-        } catch (_) {
-          alert('网络错误');
-          row.classList.remove('confirming');
-        }
-      });
-
-      // Cancel delete
-      confirmBtns[1].addEventListener('click', (e) => {
-        e.stopPropagation();
-        row.classList.remove('confirming');
-      });
-
-      historyList.appendChild(row);
-    });
-  }
-
-  historyBtn.addEventListener('click', openHistoryDrawer);
-  historyCloseBtn.addEventListener('click', closeHistoryDrawer);
-  historyOverlay.addEventListener('click', (e) => {
-    if (e.target === historyOverlay) closeHistoryDrawer();
-  });
-
-  if (savedVideoId) restoreTaskSession(savedVideoId, savedMode);
-})();
-</script>
+<!-- ============ Player Bar ============ -->
+<div class="player-bar" id="playerBar" aria-label="播放器">
+  <div class="player-bar__inner">
+    <div class="player-bar__cover">🎧</div>
+    <div class="player-bar__info">
+      <div class="player-bar__title" id="plTitle"></div>
+      <div class="player-bar__sub" id="plSub"></div>
+    </div>
+    <div class="player-bar__center">
+      <div class="player-bar__controls">
+        <button class="player-bar__rate" id="plRate" title="切换倍速">1x</button>
+        <button class="player-bar__play" id="plPlay" title="播放/暂停">▶</button>
+        <select id="plPart" title="分卷切换" hidden></select>
+      </div>
+      <div class="player-bar__track">
+        <span class="mono" id="plCur">00:00</span>
+        <input type="range" class="player-bar__seek" id="plSeek" value="0" min="0" max="100" step="0.1">
+        <span class="mono" id="plDur">00:00</span>
+      </div>
+    </div>
+    <button class="btn btn--icon" id="plClose" title="关闭播放器">✕</button>
+  </div>
+</div>
+
+<div class="toast-root" id="toastRoot"></div>
+
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

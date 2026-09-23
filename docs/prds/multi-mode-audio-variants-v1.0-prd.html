@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>同视频多模式音频版本 · PRD v1.0</title>
+  <style>
+    :root{--ink:#172033;--muted:#64748b;--line:#dce3ee;--brand:#4f46e5;--soft:#eef2ff;--ok:#047857;--warn:#b45309}
+    *{box-sizing:border-box} body{margin:0;background:#f4f6fa;color:var(--ink);font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+    main{max-width:1040px;margin:36px auto;padding:0 20px 60px}.hero,.card{background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:0 8px 30px rgba(15,23,42,.05)}
+    .hero{padding:36px;background:linear-gradient(135deg,#fff 30%,var(--soft))}.eyebrow{color:var(--brand);font-weight:750;letter-spacing:.08em}.hero h1{font-size:34px;line-height:1.2;margin:8px 0}.hero p{color:var(--muted);max-width:760px;margin:0}
+    .meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:22px}.pill{padding:5px 11px;border-radius:999px;background:#fff;border:1px solid #c7d2fe;color:#3730a3;font-size:13px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:18px}.card{padding:26px;margin-top:18px}.grid .card{margin-top:0}
+    h2{font-size:21px;margin:0 0 14px}h3{font-size:16px;margin:22px 0 8px}p{margin:8px 0}ul,ol{margin:8px 0;padding-left:22px}.ok{color:var(--ok)}.warn{color:var(--warn)}
+    table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:11px 10px}th{background:#f8fafc}
+    pre{overflow:auto;background:#111827;color:#e5e7eb;padding:18px;border-radius:12px;line-height:1.55}.flow{font-size:14px}
+    code{background:#f1f5f9;padding:2px 5px;border-radius:5px}.check li{list-style:"□  ";padding-left:4px}.decision{border-left:4px solid var(--brand);padding:12px 16px;background:var(--soft);border-radius:0 10px 10px 0}
+    footer{text-align:center;color:var(--muted);font-size:13px;margin-top:24px}@media(max-width:760px){.grid{grid-template-columns:1fr}.hero{padding:26px}.hero h1{font-size:27px}}
+  </style>
+</head>
+<body><main>
+  <section class="hero">
+    <div class="eyebrow">PRODUCT REQUIREMENTS · V1.0</div>
+    <h1>同一个视频，多种音频输出模式</h1>
+    <p>让同一 YouTube 视频共享下载、转写和清洗资产，同时为忠实翻译版、中文播客版、精华浓缩版分别生成并长期保留独立音频。</p>
+    <div class="meta"><span class="pill">清晰度 96/100</span><span class="pill">澄清轮次 1</span><span class="pill">只按模式区分版本</span><span class="pill">状态：可进入开发</span></div>
+  </section>
+
+  <section class="grid">
+    <article class="card"><h2>已确认的产品决策</h2><ul>
+      <li><strong>全部复用：</strong>元数据、原始音频、字幕/转写、清洗文本。</li>
+      <li><strong>多个版本共存：</strong>不同模式 MP3 永不互相覆盖。</li>
+      <li><strong>版本维度：</strong>当前仅使用 <code>mode</code>，不按音色或模型拆版本。</li>
+      <li><strong>相同模式：</strong>允许下载已有版本，只有明确操作才重新生成。</li>
+    </ul></article>
+    <article class="card"><h2>为什么要做</h2><p>当前系统以 <code>video_id</code> 作为唯一记录，同一视频只有一个输出槽位。不同模式会共用相同脚本、TTS 目录和 MP3 路径，导致模式信息混乱、旧版本被覆盖，也无法证明复用了源资产。</p><div class="decision"><strong>KISS 决策：</strong>不复制大体积源文件，只新增轻量的模式版本层。</div></article>
+  </section>
+
+  <section class="card"><h2>目标用户流程</h2>
+    <pre class="flow">提交 video_id + mode
+        │
+        ├── 视频源不存在
+        │     下载 → 转写 → 清洗 → 创建所选模式版本
+        │
+        └── 视频源已存在
+              ├── 相同模式已完成 → 下载已有 / 明确重新生成该模式
+              └── 当前模式不存在 → 提示复用源资产 → 创建新模式版本
+                                               翻译 → TTS → 合并</pre>
+    <h3>不同模式提示</h3><p>检测到该视频已有“忠实翻译版”。当前选择“中文播客版”，将复用已有下载、转写和清洗结果，仅执行翻译、TTS 和合并。</p><p><code>生成中文播客版</code>　<code>取消</code></p>
+    <h3>相同模式提示</h3><p>该视频已有“中文播客版”。</p><p><code>下载已有版本</code>　<code>重新生成该版本</code>　<code>取消</code></p>
+  </section>
+
+  <section class="card"><h2>数据设计</h2>
+    <p>保留 <code>episode</code> 作为共享视频源记录；新增 <code>episode_variant</code> 保存模式版本。这样迁移成本低于拆成两套全新表。</p>
+    <table><thead><tr><th>表</th><th>唯一键</th><th>职责</th></tr></thead><tbody>
+      <tr><td><code>episode</code></td><td><code>video_id</code></td><td>URL、标题、下载、字幕、转写、清洗文本和源状态。</td></tr>
+      <tr><td><code>episode_variant</code></td><td><code>(video_id, mode)</code></td><td>模式、译文、摘要、TTS、MP3、版本状态和错误。</td></tr>
+    </tbody></table>
+    <h3>episode_variant 建议字段</h3>
+    <pre>id, video_id, mode, status,
+script_zh_path, summary_path, tts_text_path,
+tts_dir, audio_zh_path, error_message,
+created_at, updated_at,
+UNIQUE(video_id, mode)</pre>
+  </section>
+
+  <section class="card"><h2>文件布局</h2>
+    <pre>data/&lt;video-title&gt;/
+├── metadata.json                 # 共享
+├── source_audio.wav              # 共享
+├── captions_en.json              # 共享
+├── transcript_clean.txt          # 共享
+└── variants/
+    ├── faithful/
+    │   ├── script_zh.txt
+    │   ├── summary.json
+    │   ├── tts_segments/
+    │   └── output.mp3
+    ├── podcast/
+    └── condensed/</pre>
+    <p class="warn">模式重生成只能清理对应 <code>variants/&lt;mode&gt;</code>，禁止删除共享源文件或其他模式目录。</p>
+  </section>
+
+  <section class="grid">
+    <article class="card"><h2>接口行为</h2><table><tbody>
+      <tr><th>查询</th><td><code>GET /api/videos/{video_id}/variants</code></td></tr>
+      <tr><th>创建</th><td><code>POST /api/process</code>，传入 <code>mode</code> 与明确的 <code>variant_action</code></td></tr>
+      <tr><th>下载</th><td><code>GET /api/download/{video_id}/{mode}</code></td></tr>
+      <tr><th>状态</th><td>任务键改为 <code>video_id:mode</code>，允许同视频不同模式独立显示。</td></tr>
+    </tbody></table></article>
+    <article class="card"><h2>状态与历史记录</h2><ul>
+      <li>被复用的下载、转写、清洗显示“已复用缓存”，而非重新计时。</li>
+      <li>历史记录按视频聚合，展开后显示各模式下载按钮。</li>
+      <li>同模式正在运行时阻止重复提交；不同模式可排队，但默认避免并发占满 API。</li>
+      <li>删除某模式只删除该版本；删除视频源必须二次确认并删除全部版本。</li>
+    </ul></article>
+  </section>
+
+  <section class="card"><h2>迁移策略</h2><ol>
+    <li>幂等创建 <code>episode_variant</code> 表。</li>
+    <li>将现有 <code>episode.mode</code>、译文、TTS 和 MP3 注册为对应模式版本。</li>
+    <li>采用“移动前校验、临时目录、原子重命名”；任何失败保留原文件。</li>
+    <li>读取逻辑短期兼容旧路径，新写入一律使用 <code>variants/&lt;mode&gt;</code>。</li>
+    <li>迁移完成并验证后，再移除旧表中的模式输出字段依赖；首版不必删列。</li>
+  </section>
+
+  <section class="card"><h2>验收标准</h2><ul class="check">
+    <li>同一视频首次生成时执行下载、转写、清洗。</li>
+    <li>第二种模式不再调用下载和转写，进度明确显示三个复用阶段。</li>
+    <li>三种模式可同时存在并分别下载，文件内容和路径互不覆盖。</li>
+    <li>忠实翻译版必须覆盖全部输入批次，保留关键数字、案例、步骤、限定条件与结论；不得夹带连续英文原文或重复双语段落。</li>
+    <li>中文播客版保留核心事实和逻辑，但允许删除口头禅、重复内容并按收听体验重组；不得与忠实版脚本完全相同。</li>
+    <li>精华浓缩版聚焦最重要观点、论证和案例，内容量目标为忠实版的 30–50%；原视频超过 60 分钟时优先控制在 20–30 分钟。</li>
+    <li>翻译任一批次失败、返回空内容或质量硬门禁失败时，任务必须失败并停止 TTS，禁止用部分译文或英文原文生成“完成”音频。</li>
+    <li>同模式再次提交时提供“下载已有”和“重新生成该版本”。</li>
+    <li>不同模式提交时文案明确为“创建新模式版本”，不使用泛化的“重新生成”。</li>
+    <li>重生成一个模式不会改变其他模式的文件、状态、时间和下载链接。</li>
+    <li>服务重启后可从共享文本或模式阶段恢复。</li>
+    <li>旧数据迁移后仍可下载，数据库迁移可重复执行。</li>
+  </ul></section>
+
+  <section class="card"><h2>执行阶段</h2><table><thead><tr><th>阶段</th><th>工作</th><th>交付物</th></tr></thead><tbody>
+    <tr><td>1 · 数据层</td><td>新表、迁移、模式目录、兼容读取</td><td>幂等数据库迁移及测试</td></tr>
+    <tr><td>2 · 管道</td><td>共享源状态、模式状态、定向清理与恢复</td><td>模式隔离的编排器</td></tr>
+    <tr><td>3 · API/UI</td><td>模式感知提示、状态键、下载、历史展示</td><td>完整交互闭环</td></tr>
+    <tr><td>4 · 验证</td><td>三模式矩阵、失败恢复、旧数据迁移、文件校验</td><td>回归测试与运行验证</td></tr>
+  </tbody></table></section>
+
+  <section class="card"><h2>范围边界</h2><p><strong>本期包含：</strong>按模式管理版本，共享所有模式无关资产。</p><p><strong>本期不包含：</strong>同模式多音色版本、同模式多模型版本、版本历史快照、多人权限与云端对象存储。</p></section>
+  <footer>Document v1.0 · 2026-07-03 · Clarification rounds: 1 · Quality score: 96/100</footer>
+</main></body></html>

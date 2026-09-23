@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -10,12 +11,14 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from src.config import get_config
 from src.storage import db
 from src.bot.handler import parse_message, extract_youtube_id
+from src.inputs import resolve_canonical_video_id
 from src.pipeline.orchestrator import process as run_pipeline, _process_async
 
 logging.basicConfig(
@@ -41,6 +44,11 @@ MIMO_PRESET_VOICES = [
     {"id": "Chloe", "name": "Chloe · English female"},
     {"id": "Milo", "name": "Milo · English male"},
     {"id": "Dean", "name": "Dean · English male"},
+]
+
+FISH_PRESET_VOICES = [
+    {"id": "7f92f8afb8ec43bf81429cc1c9199cb1", "name": "御姐 · 中文女声（Fish Audio）"},
+    {"id": "5c353fdb312f4888836a9a5680099ef0", "name": "女大 · 中文女声（Fish Audio）"},
 ]
 
 # ── SSE 阶段定义 ────────────────────────────────────────────────────────
@@ -401,6 +409,59 @@ async def serve_ui():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+# 挂载静态资源目录（CSS/JS/图等），供 index.html 引用。
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/api/tasks/{video_id}/{mode}/text")
+async def api_variant_text(video_id: str, mode: str, kind: str = "script"):
+    """读取变体目录下的文本产物（kind=script 中文脚本 / kind=summary 摘要）。
+
+    纯只读端点，不改变任何任务状态。
+    """
+    if mode not in MODE_LABELS:
+        return JSONResponse({"error": "不支持的模式"}, status_code=400)
+    if kind not in ("script", "summary"):
+        return JSONResponse({"error": "kind 仅支持 script 或 summary"}, status_code=400)
+
+    variant = db.get_variant(video_id, mode)
+    if not variant:
+        return JSONResponse({"error": "模式变体不存在"}, status_code=404)
+
+    variant_dir_value = variant.get("variant_dir")
+    if not variant_dir_value:
+        return JSONResponse({"error": "变体目录不存在"}, status_code=404)
+    variant_dir = Path(variant_dir_value)
+    if not variant_dir.is_dir():
+        return JSONResponse({"error": "变体目录不存在"}, status_code=404)
+
+    if kind == "summary":
+        path = variant_dir / "summary.json"
+        if not path.is_file():
+            return JSONResponse({"error": "摘要尚未生成"}, status_code=404)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return JSONResponse({"error": "摘要文件解析失败"}, status_code=500)
+        lines = []
+        if data.get("title_zh"):
+            lines.append(data["title_zh"])
+        if data.get("summary"):
+            lines.append(data["summary"])
+        for point in data.get("key_points") or []:
+            lines.append(f"- {point}")
+        content = "\n\n".join(lines) if lines else "（暂无摘要内容）"
+        return Response(content=content, media_type="text/plain; charset=utf-8")
+
+    path = variant_dir / "script_zh.txt"
+    if not path.is_file():
+        return JSONResponse({"error": "中文脚本尚未生成"}, status_code=404)
+    return Response(
+        content=path.read_text(encoding="utf-8"),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
 # ── API ───────────────────────────────────────────────────────────────
 
 
@@ -437,17 +498,16 @@ async def api_models(request: Request):
 
 @app.post("/api/tts-voices")
 async def api_tts_voices(request: Request):
-    """返回 MiMo V2.5 TTS 官方预置音色列表。
-
-    MiMo 当前没有独立的音色查询接口，音色由官方文档固定提供，
-    不应把 /models 的模型 ID 误当成音色 ID。
-    """
+    """返回 TTS 预置音色列表（支持 Fish Audio 与 MiMo）。"""
     try:
-        await request.json()
+        body = await request.json()
     except Exception:
-        return JSONResponse({"error": "请求体须为 JSON"}, status_code=400)
-
-    return {"voices": MIMO_PRESET_VOICES}
+        body = {}
+    provider = (body.get("provider") or "").strip()
+    base_url = (body.get("base_url") or "").strip()
+    if provider == "mimi" or "xiaomimimo" in base_url:
+        return {"voices": MIMO_PRESET_VOICES}
+    return {"voices": FISH_PRESET_VOICES}
 
 
 @app.post("/api/process")
@@ -466,15 +526,25 @@ async def api_process(request: Request):
     api_key = (body.get("api_key", "") or "").strip()
     base_url = (body.get("base_url", "") or "").strip()
     model_name = (body.get("model", "") or "").strip()
+    tts_provider = (body.get("tts_provider", "") or "").strip()
     tts_api_key = (body.get("tts_api_key", "") or "").strip()
     tts_base_url = (body.get("tts_base_url", "") or "").strip()
-    tts_model = (body.get("tts_model", "") or "mimo-v2.5-tts").strip()
-    tts_voice = (body.get("tts_voice", "") or "苏打").strip()
+    tts_model = (body.get("tts_model", "") or "").strip()
+    tts_voice = (body.get("tts_voice", "") or "").strip()
+    tts_speed = body.get("tts_speed")
     action = (body.get("action", "") or "").strip()
     legacy_force = bool(body.get("force", False))
     if legacy_force and not action:
         action = "regenerate_variant"
     resume_from = (body.get("resume_from", "") or "").strip()
+
+    speed = 1.0
+    if tts_speed is not None:
+        try:
+            speed = float(tts_speed)
+            speed = max(0.5, min(2.0, speed))
+        except (TypeError, ValueError):
+            speed = 1.0
 
     if not url:
         return JSONResponse({"error": "请输入 YouTube 链接"}, status_code=400)
@@ -497,20 +567,39 @@ async def api_process(request: Request):
     # 构建动态 TTS 配置
     tts_config = None
     if tts_api_key:
-        tts_config = {
-            "provider": "mimi",
-            "api_key": tts_api_key,
-            "base_url": tts_base_url or "https://api.xiaomimimo.com/v1",
-            "model": tts_model or "mimo-v2.5-tts",
-            "voice": tts_voice or "苏打",
-        }
+        provider = tts_provider or ("mimi" if "xiaomimimo" in tts_base_url else "fish")
+        if provider == "mimi":
+            tts_config = {
+                "provider": "mimi",
+                "api_key": tts_api_key,
+                "base_url": tts_base_url or "https://api.xiaomimimo.com/v1",
+                "model": tts_model or "mimo-v2.5-tts",
+                "voice": tts_voice or "苏打",
+                "speed": speed,
+            }
+        else:
+            fish_voice = tts_voice or "7f92f8afb8ec43bf81429cc1c9199cb1"
+            if fish_voice in ("苏打", "白桦", "冰糖", "茉莉", "Mia", "Chloe", "Milo", "Dean", "zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural"):
+                fish_voice = "7f92f8afb8ec43bf81429cc1c9199cb1"
+            tts_config = {
+                "provider": "fish",
+                "api_key": tts_api_key,
+                "base_url": tts_base_url or "https://api.fish.audio/v1",
+                "model": tts_model or "s2.1-pro-free",
+                "voice": fish_voice,
+                "speed": speed,
+            }
     else:
-        tts_config = {"provider": "edge", "voice": "zh-CN-XiaoxiaoNeural"}
+        tts_config = {"provider": "edge", "voice": tts_voice or "zh-CN-XiaoxiaoNeural", "speed": speed}
 
-    video_id = extract_youtube_id(url)
+    try:
+        _, video_id, _ = resolve_canonical_video_id(url)
+    except Exception:
+        video_id = extract_youtube_id(url)
+
     if not video_id:
         return JSONResponse({
-            "error": "无法识别 YouTube 链接，请检查后重试。\n支持格式: youtube.com/watch?v=xxx / youtu.be/xxx / 纯视频 ID"
+            "error": "无法识别视频链接，请检查后重试。\n支持格式: YouTube、B站 (BV号/b23短链)、抖音、小红书视频链接或 App 分享文案"
         }, status_code=400)
 
     # 同一视频串行；不同模式状态仍以复合键独立保存。
@@ -795,6 +884,17 @@ async def api_status(video_id: str, mode: Optional[str] = None):
             "failed": "failed",
             "cancelled": "cancelled",
         }
+        # 错误信息只在对应状态本身失败时透出。变体自身没有错误、却回落到共享的
+        # episode 行，会让 A 变体的失败污染 B 变体——查询一个已完成的变体会拿到
+        # `status: done` 加一条无关的 error_message。
+        variant_error = variant.get("error_message") if variant else None
+        if variant_error:
+            error_message = variant_error
+        elif db_status in ("failed", "cancelled"):
+            error_message = episode.get("error_message")
+        else:
+            error_message = None
+
         return {
             "video_id": video_id,
             "status": status_map.get(db_status, "unknown"),
@@ -803,10 +903,7 @@ async def api_status(video_id: str, mode: Optional[str] = None):
             "progress_messages": [],
             "current_stage": db_status,
             "output_path": variant.get("audio_zh_path") if variant else episode.get("audio_zh_path"),
-            "error_message": (
-                variant.get("error_message") if variant and variant.get("error_message")
-                else episode.get("error_message")
-            ),
+            "error_message": error_message,
             "started_at": None,
             "completed_at": None,
             "summary_path": variant.get("summary_path") if variant else episode.get("summary_path"),
@@ -886,6 +983,16 @@ async def api_tasks():
     return result
 
 
+def _part_sort_key(path: Path) -> tuple[int, str]:
+    """多集文件的自然排序键：按 Part 序号而非字符串顺序。
+
+    字符串排序会把 episode_Part10.mp3 排在 episode_Part2.mp3 前面，
+    导致下载列表集数错乱。
+    """
+    match = re.search(r"_Part(\d+)", path.stem)
+    return (int(match.group(1)) if match else 0, path.name)
+
+
 def _detect_parts(data_dir: str, primary_path: str) -> list[dict]:
     """检测 data_dir 中的多 Part MP3 文件。返回下载链接列表。"""
     parts = []
@@ -895,8 +1002,8 @@ def _detect_parts(data_dir: str, primary_path: str) -> list[dict]:
     if not d.is_dir():
         return parts
 
-    # 扫描 *_Part*.mp3
-    part_files = sorted(d.glob("*_Part*.mp3"), key=lambda p: p.name)
+    # 扫描 *_Part*.mp3（按序号自然排序，避免 Part10 排在 Part2 之前）
+    part_files = sorted(d.glob("*_Part*.mp3"), key=_part_sort_key)
     for pf in part_files:
         parts.append({"filename": pf.name, "path": str(pf)})
 
@@ -992,26 +1099,50 @@ async def api_tts_preview(request: Request):
     except Exception:
         return JSONResponse({"error": "请求体须为 JSON"}, status_code=400)
 
-    provider = (body.get("provider") or "edge").strip()
-    voice = (body.get("voice") or "zh-CN-XiaoxiaoNeural").strip()
+    provider = (body.get("provider") or "").strip()
+    voice = (body.get("voice") or "").strip()
     api_key = (body.get("api_key") or "").strip()
     base_url = (body.get("base_url") or "").strip()
     model = (body.get("model") or "").strip()
+    raw_speed = body.get("speed")
+    if raw_speed is None:
+        raw_speed = body.get("tts_speed")
+    try:
+        speed = float(raw_speed) if raw_speed is not None else 1.0
+        speed = max(0.5, min(2.0, speed))
+    except (TypeError, ValueError):
+        speed = 1.0
 
-    if provider not in ("edge", "mimi"):
+    if not provider:
+        provider = "fish" if api_key else "edge"
+
+    if provider not in ("edge", "mimi", "fish"):
         return JSONResponse({"error": f"不支持的 TTS provider: {provider}"}, status_code=400)
 
     # 构建 TTS 配置
-    if provider == "mimi" and api_key:
+    if provider == "fish" and api_key:
+        fish_voice = voice or "7f92f8afb8ec43bf81429cc1c9199cb1"
+        if fish_voice in ("苏打", "白桦", "冰糖", "茉莉", "Mia", "Chloe", "Milo", "Dean", "zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural"):
+            fish_voice = "7f92f8afb8ec43bf81429cc1c9199cb1"
+        tts_config = {
+            "provider": "fish",
+            "api_key": api_key,
+            "base_url": base_url or "https://api.fish.audio/v1",
+            "model": model or "s2.1-pro-free",
+            "voice": fish_voice,
+            "speed": speed,
+        }
+    elif provider == "mimi" and api_key:
         tts_config = {
             "provider": "mimi",
             "api_key": api_key,
             "base_url": base_url or "https://api.xiaomimimo.com/v1",
             "model": model or "mimo-v2.5-tts",
             "voice": voice or "苏打",
+            "speed": speed,
         }
     else:
-        tts_config = {"provider": "edge", "voice": voice or "zh-CN-XiaoxiaoNeural"}
+        tts_config = {"provider": "edge", "voice": voice or "zh-CN-XiaoxiaoNeural", "speed": speed}
 
     test_phrase = "你好，这是音色试听。"
 

@@ -2,7 +2,7 @@
 # API keys 等敏感信息通过环境变量注入，不写在此文件中
 
 network:
-  proxy: http://127.0.0.1:7897   # HTTP/SOCKS5 代理，供 yt-dlp 访问 YouTube
+  proxy: http://127.0.0.1:7892   # HTTP/SOCKS5 代理，供 yt-dlp 访问 YouTube
 
 app:
   name: video2listener
@@ -27,13 +27,14 @@ translation:
 # --- 以下 credentials 通过环境变量覆盖 ---
 # VIDEO2LISTENER_DEEPSEEK_API_KEY
 # VIDEO2LISTENER_DEEPSEEK_BASE_URL
-# VIDEO2LISTENER_MIMI_API_KEY   (如 Mimi TTS 需要)
+# VIDEO2LISTENER_FISH_API_KEY     (Fish Audio TTS)
+# VIDEO2LISTENER_MIMI_API_KEY     (如 Mimi TTS 需要)
 llm:
   provider: deepseek
   model: deepseek-chat
   base_url: https://api.deepseek.com
   temperature: 0.3
-  max_tokens: 4096
+  max_tokens: 8192
   translator_role: |
     你是一位资深的 AI/科技领域中文内容创作者。你的翻译需要准确、自然，适合中文听众收听。
 
@@ -46,17 +47,21 @@ llm:
     - 会影响核心结论或理解的数字、百分比、日期等关键信息必须准确保留；非关键细节可自然概括
 
 asr:
-  provider: faster-whisper
-  model: small
+  provider: whisper            # whisper | faster-whisper
+  model: large-v3-turbo
+  model_path: ~/.cache/whisper/large-v3-turbo.pt
   device: cpu
   compute_type: int8
 
 tts:
-  provider: mimi
-  voice: default
+  provider: fish              # fish | edge | mimi | openai
+  base_url: https://api.fish.audio/v1
+  model: s2.1-pro-free
+  voice: 7f92f8afb8ec43bf81429cc1c9199cb1
+  speed: 1.0                  # 语速倍率 (0.5 ~ 2.0)
   rate: 1.0
   output_format: mp3
-  concurrency: 3              # MiMo 并发请求数；过高可能触发限流
+  concurrency: 3              # TTS 并发请求数
   max_chars: 200              # 相邻短句合并后的单次请求字符上限
 
 web:

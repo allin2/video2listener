@@ -278,8 +278,15 @@ def _ensure_response_complete(response) -> None:
 
 
 
+def _segment_unit_count(piece: str) -> int:
+    words = piece.split()
+    if len(words) <= 1 and len(piece) > 10:
+        return len(piece) // 2
+    return len(words)
+
+
 def _split_translation_segments(text: str, max_words: int = TRANSLATION_MAX_WORDS) -> list[str]:
-    """按单词上限切分翻译输入，超长单段也必须继续拆分。"""
+    """按单词或汉字上限切分翻译输入，超长单段也必须继续拆分。"""
     if max_words <= 0:
         raise ValueError("max_words must be positive")
 
@@ -289,14 +296,20 @@ def _split_translation_segments(text: str, max_words: int = TRANSLATION_MAX_WORD
         words = paragraph.split()
         if not words:
             continue
-        for start in range(0, len(words), max_words):
-            pieces.append(" ".join(words[start:start + max_words]))
+        # 中文长段落（空格很少但字符多）
+        if len(words) <= 1 and len(paragraph) > max_words * 2:
+            step = max_words * 2
+            for start in range(0, len(paragraph), step):
+                pieces.append(paragraph[start:start + step])
+        else:
+            for start in range(0, len(words), max_words):
+                pieces.append(" ".join(words[start:start + max_words]))
 
     segments: list[str] = []
     current: list[str] = []
     current_words = 0
     for piece in pieces:
-        piece_words = len(piece.split())
+        piece_words = _segment_unit_count(piece)
         if current and current_words + piece_words > max_words:
             segments.append("\n\n".join(current))
             current = []
@@ -309,7 +322,11 @@ def _split_translation_segments(text: str, max_words: int = TRANSLATION_MAX_WORD
 
 
 def _split_truncated_segment(text: str) -> list[str]:
-    """将仍被模型截断的段落二分，供自适应重试使用。"""
+    """将仍被模型截断的段落二分，供自适应重试使用。优先按段落切分，保持语义完整。"""
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paragraphs) > 1:
+        middle = len(paragraphs) // 2
+        return ["\n\n".join(paragraphs[:middle]), "\n\n".join(paragraphs[middle:])]
     words = text.split()
     if len(words) > 1:
         middle = len(words) // 2
@@ -774,14 +791,15 @@ async def translate_async(
     rate_limit_rpm: int = 120,
     cancel_event: Optional[asyncio.Event] = None,
     on_audit: Optional[Callable[[dict], None]] = None,
+    source_language: str = "en",
 ) -> str:
-    """异步并发翻译入口。
+    """异步并发翻译/重写入口。
 
     所有翻译批次通过 asyncio.Semaphore + TokenBucket 并发调度。
     失败批次独立重试，成功批次保留不浪费。
 
     Args:
-        text: 清洗后的英文文本
+        text: 清洗后的原文文本（英文或中文）
         mode: 输出模式 (faithful | podcast | condensed)
         metadata: 视频元数据 dict
         on_progress: 进度回调（在 async 上下文中同步调用）
@@ -790,12 +808,16 @@ async def translate_async(
         max_concurrency: 最大并发 API 调用数
         rate_limit_rpm: token-bucket 速率限制（每分钟请求数）
         cancel_event: 取消信号
+        on_audit: 审计回调
+        source_language: 源语言代码（如 'en', 'zh'）
 
     Returns:
         中文播客稿文本
     """
     cfg = get_config()
     client, model_name, api_key = _resolve_llm_async(llm_config)
+    if llm_config and "max_tokens" in llm_config:
+        cfg["llm"]["max_tokens"] = llm_config["max_tokens"]
 
     if not api_key or api_key == "placeholder":
         logger.error("No LLM API key configured — refusing to create an English fallback artifact")
@@ -806,7 +828,13 @@ async def translate_async(
             "系统不会再把英文原文当作中文音频生成。"
         )
 
-    prompt_file = MODE_PROMPTS.get(mode, MODE_PROMPTS["podcast"])
+    if source_language == "zh":
+        if mode == "condensed":
+            prompt_file = "rewrite_chinese_condensed.txt"
+        else:
+            prompt_file = "rewrite_chinese_podcast.txt"
+    else:
+        prompt_file = MODE_PROMPTS.get(mode, MODE_PROMPTS["podcast"])
     prompt_template = _load_prompt(prompt_file)
 
     role_str = (cfg.get("llm") or {}).get("translator_role", "")
@@ -926,12 +954,13 @@ def translate(
     on_progress: Optional[Callable[[str], None]] = None,
     llm_config: Optional[dict] = None,
     batch_size: int = 1,
+    source_language: str = "en",
 ) -> str:
     """同步兼容包装——内部调用 translate_async。"""
     return asyncio.run(translate_async(
         text=text, mode=mode, metadata=metadata,
         on_progress=on_progress, llm_config=llm_config,
-        batch_size=batch_size,
+        batch_size=batch_size, source_language=source_language,
     ))
 
 

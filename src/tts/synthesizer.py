@@ -235,24 +235,105 @@ def _synthesize_segment(text: str, output_path: Path, tts_config: Optional[dict]
     """合成单个文本段为音频。
 
     根据 tts_config 路由到不同 TTS 引擎：
-    - edge: Edge TTS (免费，默认，支持 SSML)
+    - fish: Fish Audio TTS (支持 reference_id / model)
+    - edge: Edge TTS (免费，默认)
     - openai: OpenAI TTS (使用上方 API Key)
-    - mimi: Mimi TTS (默认回退)
+    - mimi: Mimi TTS
     """
     provider = tts_config.get("provider", "edge") if tts_config else "edge"
 
-    if provider == "openai":
-        _openai_tts(text, output_path, tts_config)
+    cfg = dict(tts_config) if tts_config else {}
+    if "speed" not in cfg:
+        cfg["speed"] = speed
+
+    if provider == "fish":
+        _fish_tts(text, output_path, cfg)
+    elif provider == "openai":
+        _openai_tts(text, output_path, cfg)
     elif provider == "mimi":
-        _mimi_tts(text, output_path, tts_config, speed=speed)
+        _mimi_tts(text, output_path, cfg, speed=speed)
     elif provider == "edge":
-        _edge_tts(text, output_path, use_ssml=use_ssml)
+        _edge_tts(text, output_path, use_ssml=use_ssml, speed=speed)
     else:
         try:
-            _mimi_tts(text, output_path, tts_config, speed=speed)
+            _fish_tts(text, output_path, cfg)
         except Exception:
-            logger.warning("Mimi TTS failed, falling back to edge-tts", exc_info=True)
-            _edge_tts(text, output_path, use_ssml=use_ssml)
+            logger.warning("Fish TTS failed, falling back to edge-tts", exc_info=True)
+            _edge_tts(text, output_path, use_ssml=use_ssml, speed=speed)
+
+
+def _fish_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
+              speed: Optional[float] = None) -> None:
+    """调用 Fish Audio TTS API (POST /v1/tts) 并保存返回的 MP3 音频。"""
+    api_key = (tts_config or {}).get("api_key", "")
+    base_url = (tts_config or {}).get("base_url", "https://api.fish.audio/v1")
+    model = (tts_config or {}).get("model", "s2.1-pro-free") or "s2.1-pro-free"
+    voice = (tts_config or {}).get("voice", "7f92f8afb8ec43bf81429cc1c9199cb1")
+
+    # 容错：如果前端或缓存传入了旧版 MiMo 预置音色名，自动回退到默认 Fish Audio 音色
+    legacy_or_invalid_names = {
+        "苏打", "白桦", "冰糖", "茉莉", "Mia", "Chloe", "Milo", "Dean",
+        "zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural"
+    }
+    if not voice or voice in legacy_or_invalid_names:
+        voice = "7f92f8afb8ec43bf81429cc1c9199cb1"
+
+    raw_speed = speed if speed is not None else (tts_config or {}).get("speed", 1.0)
+    try:
+        effective_speed = float(raw_speed)
+        effective_speed = max(0.5, min(2.0, effective_speed))
+    except (TypeError, ValueError):
+        effective_speed = 1.0
+
+    endpoint = base_url.rstrip("/")
+    if not endpoint.endswith("/tts"):
+        endpoint = f"{endpoint}/tts"
+
+    payload_dict = {
+        "text": text,
+        "reference_id": voice,
+        "format": "mp3",
+    }
+    if abs(effective_speed - 1.0) > 0.01:
+        payload_dict["prosody"] = {"speed": round(effective_speed, 2)}
+
+    payload = json.dumps(payload_dict).encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "model": model,
+    }
+
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+
+    import time as _time
+
+    opener = urllib.request.build_opener()
+
+    def _call_api():
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                with opener.open(req, timeout=120) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:1000]
+                raise RuntimeError(f"Fish Audio TTS API 返回 HTTP {exc.code}: {detail}") from exc
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Fish Audio TTS attempt %d/2 failed: %s", attempt + 1, str(exc)[:150])
+                if attempt < 1:
+                    _time.sleep(2)
+        raise RuntimeError(f"Fish Audio TTS 网络请求失败，已重试 2 次: {last_error}") from last_error
+
+    audio_bytes = _call_api()
+
+    if not audio_bytes or len(audio_bytes) < 32:
+        raise RuntimeError("Fish Audio TTS 返回了空或过短的音频数据")
+
+    output_path.write_bytes(audio_bytes)
+    logger.info("Fish Audio TTS: model=%s voice=%s -> %s (size=%d)", model, voice, output_path, len(audio_bytes))
 
 
 def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
@@ -329,13 +410,13 @@ def _mimi_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
     logger.info("Mimi TTS: model=%s voice=%s -> %s (size=%d)", model, voice, output_path, output_path.stat().st_size)
 
 
-def _edge_tts(text: str, output_path: Path, use_ssml: bool = True) -> None:
+def _edge_tts(text: str, output_path: Path, use_ssml: bool = True, speed: float = 1.0) -> None:
     """Edge TTS 方案（开发/测试用，免费），支持 SSML 增强自然度。"""
     import asyncio
     import edge_tts
 
     cfg = get_config()
-    rate = cfg["tts"].get("rate", 1.0)
+    rate = speed if abs(speed - 1.0) > 0.01 else cfg["tts"].get("rate", 1.0)
 
     # 自动检测语言：非 ASCII 字符占比高则用中文语音，否则用英文语音
     non_ascii = sum(1 for c in text if ord(c) > 127)
@@ -344,15 +425,13 @@ def _edge_tts(text: str, output_path: Path, use_ssml: bool = True) -> None:
     else:
         voice = cfg["tts"].get("edge_voice_en", "en-US-JennyNeural")
 
-    rate_str = f"{int((rate - 1) * 100):+d}%" if rate != 1.0 else "+0%"
+    rate_str = f"{round((rate - 1) * 100):+d}%" if abs(rate - 1.0) > 0.01 else "+0%"
 
-    # SSML 文本预处理：用 break 标签替换换行和长破折号，提升自然度
-    tts_input = text
-    if use_ssml:
-        tts_input = text.replace("——", '<break time="300ms"/>')
-        tts_input = tts_input.replace("\n\n", '<break time="800ms"/>')
-        tts_input = tts_input.replace("\n", '<break time="400ms"/>')
-        tts_input = f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="zh-CN">{tts_input}</speak>'
+    # 注意：edge-tts 库只接收纯文本，内部实现包含 escape() 转义。
+    # 若传入 <speak> 或 <break time="..."> 等 SSML 标签，会被转义导致微软语音服务
+    # 将标签作为普通文本读出（如读出 "HTTP"、"break time" 等噪音）。
+    # 停顿应由纯文本标点符号（如逗号、句号、换行）自然产生。
+    tts_input = text.replace("——", "，")
 
     async def _run():
         # Edge TTS 走直连，清除代理环境变量（否则会被代理拦截导致 SSL 错误）

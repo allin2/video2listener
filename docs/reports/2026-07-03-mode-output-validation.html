@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>video2listener · TTS 与三模式输出验收</title>
+  <style>
+    :root{--ink:#172033;--muted:#667085;--line:#e4e7ec;--bg:#f5f7fb;--card:#fff;--brand:#4f46e5;--ok:#067647;--bad:#b42318;--warn:#b54708;--soft:#eef2ff}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+    main{max-width:1100px;margin:34px auto;padding:0 20px 64px}.hero,.card{background:var(--card);border:1px solid var(--line);border-radius:18px;box-shadow:0 8px 28px rgba(16,24,40,.05)}
+    .hero{padding:34px;background:linear-gradient(135deg,#fff 42%,var(--soft))}.eyebrow{font-weight:800;letter-spacing:.08em;color:var(--brand)}h1{font-size:32px;line-height:1.2;margin:8px 0 12px}h2{font-size:21px;margin:0 0 14px}.hero p{max-width:800px;color:var(--muted);margin:0}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:18px 0}.metric,.card{padding:24px}.metric{background:#fff;border:1px solid var(--line);border-radius:16px}.metric strong{display:block;font-size:30px;line-height:1.2}.metric span{color:var(--muted)}
+    .card{margin-top:18px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;padding:12px 10px;border-bottom:1px solid var(--line)}th{background:#f8fafc}.tag{display:inline-block;padding:3px 9px;border-radius:999px;font-weight:700;font-size:12px}.ok{color:var(--ok);background:#ecfdf3}.bad{color:var(--bad);background:#fef3f2}.warn{color:var(--warn);background:#fffaeb}code{padding:2px 5px;border-radius:5px;background:#f2f4f7}.callout{border-left:4px solid var(--brand);background:var(--soft);padding:14px 16px;border-radius:0 10px 10px 0}.muted{color:var(--muted)}ul{padding-left:20px}@media(max-width:760px){.grid{grid-template-columns:1fr}h1{font-size:26px}.card{overflow:auto}}
+  </style>
+</head>
+<body><main>
+  <section class="hero">
+    <div class="eyebrow">VALIDATION REPORT · 2026-07-03</div>
+    <h1>TTS 效率与三模式内容验收</h1>
+    <p>样本：Matt Wolfe《9 Free AI Skills That Feel Like Cheat Codes》，原视频 29 分 14 秒。结论：代码层修复和回归测试已通过；磁盘上的旧三模式成品是在修复前生成，内容仍不符合要求，必须用新管道重新生成后才能完成最终验收。</p>
+  </section>
+
+  <section class="grid">
+    <div class="metric"><strong>892 → 315</strong><span>TTS 请求总数，减少 64.7%</span></div>
+    <div class="metric"><strong>87 / 87</strong><span>自动化测试通过</span></div>
+    <div class="metric"><strong>0 美元</strong><span>本次离线验证未调用外部 API</span></div>
+  </section>
+
+  <section class="card"><h2>目标一：TTS 合成效率</h2>
+    <table><thead><tr><th>模式</th><th>修复前请求</th><th>修复后请求</th><th>变化</th></tr></thead><tbody>
+      <tr><td>忠实翻译版</td><td>377</td><td>84</td><td><span class="tag ok">-77.7%</span></td></tr>
+      <tr><td>中文播客版</td><td>157</td><td>157</td><td><span class="tag warn">旧稿为单行英文，受内容错误限制</span></td></tr>
+      <tr><td>浓缩精简版</td><td>358</td><td>74</td><td><span class="tag ok">-79.3%</span></td></tr>
+    </tbody></table>
+    <ul>
+      <li>相邻短句贪心合并至 200 字以内，顺序和全部字符保持不变。</li>
+      <li>MiMo 每个请求不再额外创建单线程池。</li>
+      <li>部分失败重试会复用已完成片段；文本、模型或音色变化时缓存自动失效。</li>
+      <li>页面进度以真实 API 请求数统计，不再把展示行数误当成任务数。</li>
+    </ul>
+  </section>
+
+  <section class="card"><h2>目标二：忠实翻译完整中文版本</h2>
+    <table><tbody>
+      <tr><th>旧成品连续英文</th><td>检测到 2 段，其中最长约 4,155 字符</td><td><span class="tag bad">不通过</span></td></tr>
+      <tr><th>原文数字保留率</th><td>90%</td><td><span class="tag warn">达到最低门槛，但不足以证明语义完整</span></td></tr>
+      <tr><th>新管道结构完整性</th><td>任何翻译批次失败都会整体失败，不再静默缺段</td><td><span class="tag ok">代码通过</span></td></tr>
+      <tr><th>逐段审计证据</th><td>新管道记录源片段和译文片段哈希、字数及数字保留情况</td><td><span class="tag ok">代码通过</span></td></tr>
+      <tr><th>新管道语言门禁</th><td>连续 20 个以上英文词会触发重试或失败，TTS 前再次校验</td><td><span class="tag ok">代码通过</span></td></tr>
+    </tbody></table>
+    <p class="callout">当前旧 MP3 不能宣称“包含原视频所有信息的汉语版本”。最终通过条件是：新稿无连续英文、所有输入批次均有输出、关键数字完整，并对首段/中段/尾段做人工语义抽检。</p>
+  </section>
+
+  <section class="card"><h2>目标三：三种模式侧重点不同</h2>
+    <table><thead><tr><th>模式</th><th>旧成品事实</th><th>判定</th><th>新规则</th></tr></thead><tbody>
+      <tr><td>忠实翻译版</td><td>36.0 分钟，夹杂大段英文和重复译文</td><td><span class="tag bad">不通过</span></td><td>逐句覆盖全部信息，不得省略、复制英文或重复双语</td></tr>
+      <tr><td>中文播客版</td><td>73.7 分钟；文件开头明确写着“未配置 API Key，使用英文原文”</td><td><span class="tag bad">不通过</span></td><td>保留核心观点并口语化重组；无密钥直接失败</td></tr>
+      <tr><td>浓缩精简版</td><td>37.3 分钟，比原视频和忠实版都更长</td><td><span class="tag bad">不通过</span></td><td>目标为忠实内容量约 30–50%，长视频才优先控制在 20–30 分钟</td></tr>
+    </tbody></table>
+    <p>新管道还会拒绝与其他模式完全相同的脚本。三套提示词分别约束“完整翻译”“播客化重组”“提炼核心”，避免同一稿件换文件名。</p>
+  </section>
+
+  <section class="card"><h2>PRD 逐项证据</h2>
+    <table><thead><tr><th>要求</th><th>证据</th><th>状态</th></tr></thead><tbody>
+      <tr><td>共享下载、转写、清洗资产</td><td>管道测试验证新模式不会调用三个共享阶段</td><td><span class="tag ok">通过</span></td></tr>
+      <tr><td>模式目录、状态和 MP3 不互相覆盖</td><td>独立 variant 目录与数据库唯一键；隔离测试通过</td><td><span class="tag ok">通过</span></td></tr>
+      <tr><td>TTS 进度反映真实任务</td><td>进度分母来自合并后的 API 请求数；缓存命中计入完成数</td><td><span class="tag ok">通过</span></td></tr>
+      <tr><td>忠实版是完整中文</td><td>旧成品存在英文；新成品尚未重新生成</td><td><span class="tag bad">待真实重跑</span></td></tr>
+      <tr><td>播客版、浓缩版侧重点不同</td><td>提示词和硬门禁已修；旧成品不合格</td><td><span class="tag bad">待真实重跑</span></td></tr>
+    </tbody></table>
+  </section>
+
+  <section class="card"><h2>最终验收所需操作</h2>
+    <ol>
+      <li>在页面保持“记住配置”开启，依次明确重新生成忠实、播客、浓缩三个模式。</li>
+      <li>运行 <code>.venv/bin/python scripts/evaluate_mode_outputs.py --strict</code>。</li>
+      <li>确认连续英文均为 0、忠实数字保留率至少 0.9、浓缩/忠实时长比不高于 0.5。</li>
+      <li>人工抽检三个时间层（开头、中间、结尾），验证忠实版信息完整，并确认另外两版的组织与侧重点不同。</li>
+    </ol>
+    <p class="muted">本次无法自动触发真实重生成：服务进程中没有 DeepSeek/MiMo 环境变量，且当前浏览器安全策略禁止自动访问本地应用。未读取、输出或持久化任何密钥。</p>
+  </section>
+</main></body></html>

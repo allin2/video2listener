@@ -15,32 +15,35 @@
 10. 只输出中文播客稿，不要输出解释
 11. 输入可能是原视频的连续片段，不要为每个片段重复添加节目开场、预告、总结或告别语
 12. 不得复制英文原文段落；仅专有名词、产品名和技术缩写可以保留英文
+13. 彻底剔除商业赞助与导流：自动识别并剔除与主题无关的商业赞助口播（第三方软件/App推广、优惠码折扣、赞助商鸣谢、简介区链接下载导流等）
+14. 彻底剔除平台互动套话：剔除求关注、求订阅、求点赞、一键三连、评论区留言互动等社交媒体平台套话
+15. 过滤无关生活琐碎闲聊：只保留核心知识与核心方法精华，剔除与主干完全脱节的日常琐事闲聊
 
-{{metadata}}
-英文内容如下：
-{{content}}
-
-## Examples
+## 参考示例 (Examples)
 
 英文：
 Welcome back to the podcast. Today we have a really special guest, someone I've been wanting to talk to for a long time. She's been working on AI safety for over a decade, and her recent paper on mechanistic interpretability has been making waves in the community. I'm so excited to dive into this. But before we get into the technical stuff, maybe you could tell us a little bit about your background? How did you end up working on AI safety?
 
-Yeah, thanks for having me. It's great to be here. So, I actually started out in neuroscience. I was doing fMRI studies, trying to understand how the human brain represents concepts. And after a few years of that, I realized that artificial neural networks were becoming interesting enough that we could actually study them the same way we study biological brains. So I made the switch around 2016, joined an AI lab, and never looked back. It turns out that a lot of the techniques we use to study brain activity — you know, probing specific regions, looking at activation patterns — those same techniques work remarkably well for understanding what's happening inside a transformer.
-
 中文：
-
 今天的嘉宾在 AI 安全领域深耕了十多年，她最近那篇关于机制可解释性的论文在圈内引起了不小的震动。有意思的是，她的起点并非 AI，而是神经科学——她最早做的是 fMRI 研究，试图理解人脑如何表征概念。到了 2016 年左右，她意识到人工神经网络的复杂度已经足够高，完全可以用研究生物大脑的那套方法来研究。于是她转到了 AI 实验室，把脑科学中的探测技术搬到了 Transformer 上，用来理解模型内部到底在发生什么。
 
 英文：
 I want to share three practical lessons we learned from deploying LLMs in production over the past year. First, latency matters way more than you think. We did an A/B test where we compared a slower but slightly more accurate model against a faster one. User engagement dropped by 12 percent with the slower model, even though the answers were objectively better. People just bounce when they have to wait. Second, prompt engineering doesn't scale. You end up with hundreds of prompt templates, each tweaked for a slightly different use case, and maintaining them becomes a nightmare. We eventually moved to a fine-tuning approach for our core use cases and kept prompting only for the long tail. Third, and this is the one that surprised us the most — having a human in the loop for sensitive outputs doesn't slow things down nearly as much as you'd think. Users actually prefer it when the system says "let me double-check that" instead of giving a potentially wrong answer. The key is making the human review step fast, like under 30 seconds, and giving the reviewer really good context.
 
 中文：
-
 今天分享我们在生产环境部署大语言模型的三条实战经验。第一，延迟比你想象的更重要。我们做过一次 A/B 测试，把一个更准但更慢的模型和一个更快但稍弱一点的模型做了对比。结果是，慢模型的用户参与度下降了 12%，尽管它的回答质量客观上更好。用户就是不愿意等。第二，提示词工程不可规模化。做着做着你就积累了几百个提示词模板，每个都针对一个细分的场景做过微调，维护起来就是噩梦。我们的解法是，对核心场景走微调路线，只在长尾场景上保留提示词。第三条最让我们意外——在敏感输出上保留人工审核环节，其实并不会让用户体验变得很慢。用户反而更喜欢系统说"稍等，我再确认一下"，而不是给一个可能出错的答案。关键在于把人工审核做到足够快，控制在三十秒以内，并且给审核人员提供充分的上下文。
 
 英文：
 So we've been talking about the transformer architecture, but I think it's worth stepping back and asking: is attention really all we need? The title of that famous paper was provocative for a reason. Attention is incredibly powerful — it gives you this global receptive field where every token can directly interact with every other token. That's why transformers scale so well. But there are real drawbacks. The quadratic complexity in sequence length means you hit a wall pretty quickly. That's why people are so excited about state space models like Mamba — they give you linear complexity with sequence length. Whether they can match transformers on quality at scale is still an open question. My bet is we'll end up with some kind of hybrid architecture. Use attention where you need that global context, use state space layers where you don't.
 
 中文：
-
 注意力机制真的是我们需要的全部吗？那篇著名论文的标题确实很挑衅。注意力的强大之处在于全局感受野——每个 token 都可以和序列中的任何其他 token 直接交互，这也是 Transformer 扩展性如此之好的根源。但它有个硬伤：计算复杂度随序列长度呈平方级增长，序列一长就碰壁。所以现在大家对 Mamba 这类状态空间模型才这么兴奋——它的复杂度是线性的。不过，线性的模型在大规模下能否匹敌 Transformer 的质量，目前还没有定论。我个人的判断是，最终会走向某种混合架构：需要全局上下文的地方用注意力，不需要的地方就用状态空间层。
+
+## 待翻译内容
+{{metadata}}
+英文内容如下：
+<SOURCE_CONTENT>
+{{content}}
+</SOURCE_CONTENT>
+
+请严格遵循上述要求与风格，直接输出对应的中文精华播客稿（不要输出任何解释说明、开场白或额外示例）：

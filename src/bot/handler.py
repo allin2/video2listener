@@ -55,3 +55,13 @@ def extract_youtube_id(text: str) -> Optional[str]:
         if match:
             return match.group(1)
     return None
+
+
+def extract_video_id(text: str) -> Optional[str]:
+    """从文本中提取视频 ID，支持 YouTube、B站、抖音、小红书等。"""
+    from src.inputs import parse_video_input
+    try:
+        _, vid, _ = parse_video_input(text)
+        return vid
+    except Exception:
+        return None

@@ -41,6 +41,38 @@ def test_clean_handles_english_names():
     assert "OpenAI" in result
 
 
+def test_clean_preserves_underscores_in_technical_identifiers():
+    """下划线属于内容本身，不能被当作 Markdown 符号删除。
+
+    回归：此前字符类包含 `_`，会把 VIDEO2LISTENER_DEEPSEEK_API_KEY 清洗成
+    VIDEO2LISTENERDEEPSEEKAPIKEY，导致给用户的配置指引失效。
+    """
+    text = "请设置 VIDEO2LISTENER_DEEPSEEK_API_KEY 后重试，并检查 __init__ 方法。"
+    result = clean_for_tts(text)
+
+    assert "VIDEO2LISTENER_DEEPSEEK_API_KEY" in result
+    assert "__init__" in result
+    assert "VIDEO2LISTENERDEEPSEEKAPIKEY" not in result
+
+
+def test_clean_preserves_snake_case_and_paths():
+    text = "调用 get_config() 读取 config.yaml，字段是 api_key。"
+    result = clean_for_tts(text)
+
+    assert "get_config" in result
+    assert "config.yaml" in result
+    assert "api_key" in result
+
+
+def test_clean_still_removes_markdown_emphasis_without_touching_identifiers():
+    text = "**重点**：使用 snake_case 命名。"
+    result = clean_for_tts(text)
+
+    assert "**" not in result
+    assert "重点" in result
+    assert "snake_case" in result
+
+
 def test_clean_empty_text():
     result = clean_for_tts("")
     assert result == ""
@@ -100,6 +132,96 @@ def test_mimo_tts_uses_chat_completions_contract(tmp_path, monkeypatch):
         "audio": {"format": "wav", "voice": "苏打"},
     }
     assert output.read_bytes() == expected_audio
+
+
+def test_fish_tts_uses_official_contract(tmp_path, monkeypatch):
+    """Fish Audio TTS 必须使用用户指定的 POST /v1/tts 协议，带 model 头与 reference_id。"""
+    expected_audio = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 40
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return expected_audio
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = {k.lower(): v for k, v in request.header_items()}
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(synthesizer.urllib.request, "build_opener", lambda *_args: FakeOpener())
+    output = tmp_path / "segment.mp3"
+
+    synthesizer._fish_tts("我替你们把 Obsidian 学了一遍。", output, {
+        "api_key": "test-fish-key",
+        "base_url": "https://api.fish.audio/v1",
+        "model": "s2.1-pro-free",
+        "voice": "7f92f8afb8ec43bf81429cc1c9199cb1",
+    })
+
+    assert captured["url"] == "https://api.fish.audio/v1/tts"
+    assert captured["headers"]["authorization"] == "Bearer test-fish-key"
+    assert captured["headers"]["content-type"] == "application/json"
+    assert captured["headers"]["model"] == "s2.1-pro-free"
+    assert captured["payload"] == {
+        "text": "我替你们把 Obsidian 学了一遍。",
+        "reference_id": "7f92f8afb8ec43bf81429cc1c9199cb1",
+        "format": "mp3",
+    }
+    assert output.read_bytes() == expected_audio
+
+
+def test_fish_tts_sanitizes_legacy_mimo_voices(tmp_path, monkeypatch):
+    """当传入旧版 MiMo 预置音色（如'茉莉'）时，自动纠偏为默认 Fish Audio ID。"""
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 40
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+    monkeypatch.setattr(synthesizer.urllib.request, "build_opener", lambda *_args: FakeOpener())
+    output = tmp_path / "segment.mp3"
+
+    synthesizer._fish_tts("测试", output, {
+        "api_key": "test-key",
+        "voice": "茉莉",
+    })
+
+    assert captured["payload"]["reference_id"] == "7f92f8afb8ec43bf81429cc1c9199cb1"
+
+
+
+def test_synthesize_segment_routes_to_fish(tmp_path, monkeypatch):
+    called = []
+
+    def fake_fish(text, output_path, tts_config):
+        called.append((text, output_path, tts_config))
+        output_path.write_bytes(b"dummy mp3")
+
+    monkeypatch.setattr(synthesizer, "_fish_tts", fake_fish)
+    out = tmp_path / "test.mp3"
+    synthesizer._synthesize_segment("测试文本", out, tts_config={"provider": "fish", "api_key": "k"})
+    assert len(called) == 1
+    assert called[0][0] == "测试文本"
 
 
 def test_mimo_segments_use_wav_extension(tmp_path, monkeypatch):
@@ -209,3 +331,152 @@ def test_tts_cache_is_invalidated_when_voice_changes(tmp_path, monkeypatch):
     )
 
     assert calls == [text, text]
+
+
+def test_edge_tts_does_not_emit_raw_ssml_or_http_tags(tmp_path, monkeypatch):
+    """验证 Edge TTS 不会发送 <speak> 或 <break time="..."> 等 SSML 标签。
+
+    回归：此前 _edge_tts 自行拼接了 SSML 标签，但 edge_tts.Communicate 库会转义这些标签，
+    导致微软语音服务把标签当成普通正文读出 "HTTP"、"break time" 等严重噪音。
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    calls = []
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            calls.append((text, voice, kwargs))
+
+        async def save(self, path):
+            pass
+
+    mock_edge = MagicMock()
+    mock_edge.Communicate = FakeCommunicate
+    monkeypatch.setitem(sys.modules, "edge_tts", mock_edge)
+
+    out_file = tmp_path / "out.mp3"
+    test_text = "这是第一句话——这是破折号之后的句子。\n\n这是新段落。"
+
+    synthesizer._edge_tts(test_text, out_file, use_ssml=True)
+
+    assert len(calls) == 1
+    passed_text, voice, _ = calls[0]
+
+    # 绝不能包含原始 XML/SSML 标签或 URL
+    assert "<speak" not in passed_text
+    assert "</speak>" not in passed_text
+    assert "<break" not in passed_text
+    assert "xmlns" not in passed_text
+    assert "http" not in passed_text
+    assert "break time" not in passed_text
+    # 破折号应替换为自然停顿标点
+    assert "——" not in passed_text
+    assert "，" in passed_text
+
+
+def test_fish_tts_supports_speed_prosody(tmp_path, monkeypatch):
+    """Fish Audio TTS 在语速不为 1.0 时应在请求体中带上 prosody.speed。"""
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 40
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+    monkeypatch.setattr(synthesizer.urllib.request, "build_opener", lambda *_args: FakeOpener())
+    output = tmp_path / "segment.mp3"
+
+    # 测试通过 tts_config["speed"] = 1.25
+    synthesizer._fish_tts("测试文本", output, {
+        "api_key": "test-key",
+        "speed": 1.25,
+    })
+    assert captured["payload"]["prosody"] == {"speed": 1.25}
+
+    # 测试通过 speed 参数 = 0.8
+    synthesizer._fish_tts("测试文本", output, {
+        "api_key": "test-key",
+    }, speed=0.8)
+    assert captured["payload"]["prosody"] == {"speed": 0.8}
+
+    # 测试默认 1.0 时不包含 prosody
+    synthesizer._fish_tts("测试文本", output, {
+        "api_key": "test-key",
+        "speed": 1.0,
+    })
+    assert "prosody" not in captured["payload"]
+
+
+def test_fish_tts_clamps_speed_prosody(tmp_path, monkeypatch):
+    """Fish Audio TTS 超出 0.5 ~ 2.0 范围的语速应被截断限制。"""
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 40
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+
+    monkeypatch.setattr(synthesizer.urllib.request, "build_opener", lambda *_args: FakeOpener())
+    output = tmp_path / "segment.mp3"
+
+    # 3.0 应被限制为 2.0
+    synthesizer._fish_tts("测试文本", output, {
+        "api_key": "test-key",
+        "speed": 3.0,
+    })
+    assert captured["payload"]["prosody"] == {"speed": 2.0}
+
+    # 0.1 应被限制为 0.5
+    synthesizer._fish_tts("测试文本", output, {
+        "api_key": "test-key",
+        "speed": 0.1,
+    })
+    assert captured["payload"]["prosody"] == {"speed": 0.5}
+
+
+def test_edge_tts_supports_speed(tmp_path, monkeypatch):
+    """Edge-TTS 应将 speed 倍率转换为百分比 rate 字符串。"""
+    import sys
+    from unittest.mock import MagicMock
+
+    calls = []
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            calls.append((text, voice, kwargs))
+
+        async def save(self, path):
+            pass
+
+    mock_edge = MagicMock()
+    mock_edge.Communicate = FakeCommunicate
+    monkeypatch.setitem(sys.modules, "edge_tts", mock_edge)
+
+    out_file = tmp_path / "out.mp3"
+    synthesizer._edge_tts("测试文本", out_file, speed=1.2)
+    assert calls[-1][2].get("rate") == "+20%"
+
+    synthesizer._edge_tts("测试文本", out_file, speed=0.8)
+    assert calls[-1][2].get("rate") == "-20%"
+

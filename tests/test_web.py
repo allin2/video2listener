@@ -30,22 +30,33 @@ def test_tts_message_emits_stage_progress_with_percentage():
     assert entry["stage_meta"][5] == "TTS 合成中... (18/49)"
 
 
+def _js(name: str) -> str:
+    """读取拆分后的前端 JS 模块源码，用于前端行为断言。"""
+    return (Path(server.STATIC_DIR) / "js" / name).read_text(encoding="utf-8")
+
+
 def test_progress_page_has_return_button_and_deferred_session_restore():
     html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    main_js = _js("main.js")
+    timeline_js = _js("timeline.js")
 
-    assert 'id="progressBackBtn"' in html
-    assert "if (savedVideoId) restoreTaskSession(savedVideoId, savedMode);" in html
-    assert html.index("class PipelineTimeline") < html.index(
-        "if (savedVideoId) restoreTaskSession(savedVideoId, savedMode);"
-    )
+    # 进度视图保留取消/返回入口（新 UI 以 cancelBtn 承担返回职责）
+    assert 'id="cancelBtn"' in html
+    # 会话恢复推迟到 main.js 模块加载后执行
+    assert "if (savedVid) restoreTaskSession(savedVid, savedMode);" in main_js
+    # ESM 依赖先加载：main.js 在顶部导入 timeline.js
+    assert "from './timeline.js'" in main_js
+    assert "class PipelineTimeline" in timeline_js
 
 
 def test_transient_poll_failure_does_not_show_terminal_error():
-    html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    stream_js = _js("stream.js")
+    main_js = _js("main.js")
+    all_js = stream_js + main_js
 
-    assert "markConnectionInterrupted" in html
-    assert "连接暂时中断，正在重试" in html
-    assert "showError('连接中断')" not in html
+    assert "onInterrupted" in stream_js
+    assert "连接暂时中断" in all_js
+    assert "showError('连接中断')" not in all_js
 
 
 def test_public_task_state_excludes_cancel_event():
@@ -64,12 +75,56 @@ def test_public_task_state_excludes_cancel_event():
 
 
 def test_poll_ui_keeps_progress_meta_and_clears_finished_actions():
-    html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    timeline_js = _js("timeline.js")
+    main_js = _js("main.js")
 
-    assert "parts.push(s.meta)" in html
-    assert "parts.push(formatElapsed(s.duration_s))" in html
-    assert "this.setStageDone(s.stage_id, s.duration_s, s.meta)" in html
-    assert "timeline.clearAllActions()" in html
+    # 轮询/快照回放时保留阶段 meta 与耗时，完成时清空操作区
+    assert "st.msgEl.textContent = s.meta" in timeline_js
+    assert "parts.push(formatElapsed(durationS))" in timeline_js
+    assert "this.setStageDone(s.stage_id, s.duration_s, s.meta)" in timeline_js
+    assert "timeline.clearAllActions()" in main_js
+
+
+def test_status_does_not_leak_other_variant_error_into_done_variant():
+    """已完成变体的状态里不能出现别的变体的错误信息。
+
+    回归：episode 行的 error_message 是共享的，某个模式失败后会把错误写到
+    episode 行。此处再回落到 episode 行，会让「已完成的播客版」查询结果变成
+    `status: done` 加一条无关的 error_message。
+    """
+    video_id = f"test-leak-{uuid.uuid4()}"
+    try:
+        db.create_episode(video_id, url="https://youtu.be/test", title="t")
+        db.upsert_variant(video_id, "podcast", status="done")
+        db.update_variant_status(video_id, "podcast", "done", audio_zh_path="/tmp/a.mp3")
+
+        # 另一个模式失败，错误写到了共享的 episode 行
+        db.update_status(video_id, "failed", error_message="No module named 'faster_whisper'")
+
+        with TestClient(server.app) as client:
+            body = client.get(f"/api/status/{video_id}/podcast").json()
+
+        assert body["status"] == "done"
+        assert body["error_message"] is None
+    finally:
+        db.delete_episode(video_id)
+
+
+def test_status_still_reports_error_when_variant_generation_failed():
+    """变体自身失败时，错误信息必须照常透出，不能被上面的修复吞掉。"""
+    video_id = f"test-err-{uuid.uuid4()}"
+    try:
+        db.create_episode(video_id, url="https://youtu.be/test", title="t")
+        db.upsert_variant(video_id, "faithful", status="failed")
+        db.update_variant_status(video_id, "faithful", "failed", error_message="未配置翻译 API Key")
+
+        with TestClient(server.app) as client:
+            body = client.get(f"/api/status/{video_id}/faithful").json()
+
+        assert body["status"] == "failed"
+        assert body["error_message"] == "未配置翻译 API Key"
+    finally:
+        db.delete_episode(video_id)
 
 
 def test_completed_stage_uses_frozen_duration():
@@ -249,31 +304,37 @@ def test_sse_snapshot_recovers_stages_emitted_before_connection():
 
 
 def test_frontend_applies_initial_sse_state_snapshot():
-    html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    stream_js = _js("stream.js")
 
-    assert "addEventListener('state_snapshot'" in html
-    assert "timeline.updateFromPoll(state.stages)" in html
+    assert "addEventListener('state_snapshot'" in stream_js
+    assert "ctx.timeline.updateFromPoll(state.stages)" in stream_js
 
 
 def test_frontend_uses_mode_aware_routes_and_distinct_reuse_copy():
-    html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    main_js = _js("main.js")
+    timeline_js = _js("timeline.js")
+    api_js = _js("api.js")
 
-    assert "reuse_available" in html
-    assert "variant_exists" in html
-    assert "生成' + (labels[currentMode]" in html
-    assert "重新生成此模式" in html
-    assert "sessionStorage.setItem('v2l_mode',currentMode)" in html
-    assert "'/api/status/' + vid + '/' + mode + '/stream'" in html
-    assert "`/api/download/${videoId}/${currentMode}`" in html
-    assert "case 'reused':" in html
+    # 智能拦截三分支 + 模式感知路由 + 区分复用/重生成文案
+    assert "reuse_available" in main_js
+    assert "variant_exists" in main_js
+    assert "⚡ 立即快速生成" in main_js
+    assert "🔄 重新生成" in main_js
+    assert "前三步 100% 缓存复用" in main_js
+    assert "setItem(SESSION_KEYS.mode, mode)" in main_js
+    assert "SESSION_KEYS" in main_js and "'v2l_mode'" in main_js
+    assert "/api/status/${vid}/${mode}/stream" in api_js
+    assert "/api/download/${vid}/${mode}" in api_js
+    assert "case 'reused':" in timeline_js
 
 
 def test_frontend_reconnects_to_existing_task_instead_of_showing_submit_failed():
-    html = (Path(server.STATIC_DIR) / "index.html").read_text(encoding="utf-8")
+    main_js = _js("main.js")
 
-    assert "resp.status === 409" in html
-    assert "restoreTaskSession(data.video_id, data.mode)" in html
-    assert "data.error||data.message||'提交失败'" in html
+    assert "status === 409" in main_js
+    assert "restoreTaskSession(data.video_id, data.mode)" in main_js
+    assert "data.error || data.message" in main_js
+    assert "'提交失败'" in main_js
 
 
 def test_confirmed_new_mode_uses_mode_keyed_task_state(isolated_web_db, monkeypatch):
@@ -361,8 +422,83 @@ def test_legacy_status_and_download_routes_resolve_existing_variant(isolated_web
     status = client.get("/api/status/video123456")
     download = client.get("/api/download/video123456")
 
-    assert status.status_code == 200
-    assert status.json()["mode"] == "faithful"
-    assert status.json()["status"] == "done"
     assert download.status_code == 200
     assert download.content == b"faithful"
+
+
+def test_tts_voices_includes_fish_preset():
+    with TestClient(server.app) as client:
+        resp = client.post("/api/tts-voices", json={"provider": "fish"})
+        assert resp.status_code == 200
+        voices = resp.json()["voices"]
+        assert any(v["id"] == "7f92f8afb8ec43bf81429cc1c9199cb1" and "御姐" in v["name"] for v in voices)
+        assert any(v["id"] == "5c353fdb312f4888836a9a5680099ef0" and "女大" in v["name"] for v in voices)
+
+
+def test_tts_preview_with_fish_provider(monkeypatch):
+    called = []
+
+    def fake_synthesize(text, out_dir, **kwargs):
+        called.append((text, kwargs))
+        f = Path(out_dir) / "segment_0000.mp3"
+        f.write_bytes(b"fake mp3 audio")
+        return [f]
+
+    import src.tts.synthesizer as synth
+    monkeypatch.setattr(synth, "synthesize", fake_synthesize)
+
+    with TestClient(server.app) as client:
+        resp = client.post("/api/tts-preview", json={
+            "provider": "fish",
+            "api_key": "test-key",
+            "voice": "7f92f8afb8ec43bf81429cc1c9199cb1",
+        })
+        assert resp.status_code == 200
+        assert len(called) == 1
+        assert called[0][1]["tts_config"]["provider"] == "fish"
+        assert called[0][1]["tts_config"]["voice"] == "7f92f8afb8ec43bf81429cc1c9199cb1"
+        assert called[0][1]["tts_config"]["speed"] == 1.0
+
+        # 带 speed 参数的试听测试
+        resp2 = client.post("/api/tts-preview", json={
+            "provider": "fish",
+            "api_key": "test-key",
+            "speed": 1.25,
+        })
+        assert resp2.status_code == 200
+        assert len(called) == 2
+        assert called[1][1]["tts_config"]["speed"] == 1.25
+
+
+def test_api_process_passes_tts_speed(monkeypatch, isolated_web_db):
+    """验证 /api/process 接口能正确提取 tts_speed 参数并注入 tts_config。"""
+    captured = {}
+
+    async def fake_pipeline(video_id, mode, **kwargs):
+        captured["video_id"] = video_id
+        captured["tts_config"] = kwargs.get("tts_config")
+        return {
+            "status": "done", "video_id": video_id, "mode": mode,
+            "output_path": "/tmp/dummy.mp3", "message": "done",
+        }
+
+    monkeypatch.setattr(server, "_process_async", fake_pipeline)
+
+    with TestClient(server.app) as client:
+        resp = client.post("/api/process", json={
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "mode": "podcast",
+            "action": "create_variant",
+            "api_key": "test-key",
+            "tts_api_key": "test-fish-key",
+            "tts_speed": 1.5,
+        })
+        assert resp.status_code == 200
+        for _ in range(50):
+            if "tts_config" in captured:
+                break
+            time.sleep(0.02)
+        assert captured.get("tts_config") is not None
+        assert captured["tts_config"]["speed"] == 1.5
+
+

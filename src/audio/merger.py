@@ -49,12 +49,12 @@ def merge(
     max_minutes = cfg["audio"]["max_output_minutes"]
     bitrate = cfg["audio"]["bitrate"]
 
-    # 估算总时长（假设平均语速 ~250 字/分钟，128kbps≈1MB/分钟）
-    # 更准确的方式是用 ffprobe 获取每个片段时长
-    total_duration_minutes = _estimate_duration(segments, bitrate)
+    # 逐片段取实际时长：既用于判断是否需要拆集，也用于按需拆分。
+    durations = _probe_durations(segments, bitrate)
+    total_duration_minutes = sum(durations) / 60.0
 
     if on_progress:
-        on_progress(f"合并 {len(segments)} 个音频片段（估计总时长 {total_duration_minutes:.0f} 分钟）...")
+        on_progress(f"合并 {len(segments)} 个音频片段（总时长 {total_duration_minutes:.1f} 分钟）...")
 
     output_files: list[Path] = []
 
@@ -63,19 +63,17 @@ def merge(
         _concat_segments(segments, out, bitrate)
         output_files.append(out)
     else:
-        # 拆分多集
-        part_count = int(total_duration_minutes / max_minutes) + 1
-        segs_per_part = len(segments) // part_count + 1
-        for part_idx in range(part_count):
-            start = part_idx * segs_per_part
-            end = min(start + segs_per_part, len(segments))
-            part_segs = segments[start:end]
-            if not part_segs:
-                break
-            out = output_path.parent / f"{output_path.stem}_Part{part_idx + 1}.mp3"
+        # 按实际时长贪心切分，而不是按片段个数平均分。片段长度差异可以超过十倍，
+        # 按个数分会让某一集远超单集上限。
+        groups = _group_by_duration(segments, durations, max_minutes)
+        for part_idx, part_segs in enumerate(groups, start=1):
+            out = output_path.parent / f"{output_path.stem}_Part{part_idx}.mp3"
             _concat_segments(part_segs, out, bitrate)
             output_files.append(out)
-            logger.info("Part %d/%d written: %s", part_idx + 1, part_count, out)
+            logger.info(
+                "Part %d/%d written: %s (%.1f min, %d segments)",
+                part_idx, len(groups), out, _group_minutes(part_segs, segments, durations), len(part_segs),
+            )
 
     return output_files
 
@@ -176,38 +174,81 @@ def _validate_output(segments: list[Path], output: Path) -> None:
         )
 
 
-def _estimate_duration(segments: list[Path], bitrate: str) -> float:
-    """估算总时长（分钟）。
-
-    优先用 ffprobe 获取精确时长；回退到文件大小估算。
-    """
-    # 尝试 ffprobe 获取实际时长（精确，支持 WAV/MP3）
+def _estimate_from_size(path: Path, bitrate: str) -> float:
+    """按文件大小估算单个片段时长（秒）。仅在 ffprobe 失败时兜底。"""
     try:
-        import subprocess as _sp
-        total_sec = 0.0
-        for p in segments:
-            if not p.exists():
-                continue
-            result = _sp.run(
-                [_resolve_media_tool("ffprobe"), "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                total_sec += float(result.stdout.strip())
-        if total_sec > 0:
-            return total_sec / 60.0
-    except Exception:
-        pass
-
-    # 回退：文件大小估算（WAV 用 ~706kbps，MP3 用配置值）
-    total_bytes = sum(p.stat().st_size for p in segments if p.exists())
-    first_ext = segments[0].suffix.lower() if segments else ""
-    if first_ext == ".wav":
+        size = path.stat().st_size
+    except OSError:
+        return 0.0
+    if path.suffix.lower() == ".wav":
         # WAV: 44100 Hz * 16 bit * 1 channel = 705.6 kbps
         bps = 705600
     else:
         bps = int(bitrate.replace("k", "")) * 1000
     if bps == 0:
-        return len(segments) * 0.5
-    return (total_bytes * 8 / bps) / 60.0
+        return 0.5
+    return size * 8 / bps
+
+
+def _probe_durations(segments: list[Path], bitrate: str) -> list[float]:
+    """返回每个片段的时长（秒）。
+
+    优先用 ffprobe 精确读取；单个文件读取失败时回退到按文件大小估算，
+    不让一个坏文件毁掉整批计算。缺失文件按 0 处理。
+    """
+    durations: list[float] = []
+    for path in segments:
+        if not path.exists():
+            durations.append(0.0)
+            continue
+        try:
+            durations.append(_probe_duration(path))
+        except Exception:
+            logger.warning("无法读取片段时长，改用文件大小估算: %s", path.name)
+            durations.append(_estimate_from_size(path, bitrate))
+    return durations
+
+
+def _group_by_duration(
+    segments: list[Path], durations: list[float], max_minutes: float
+) -> list[list[Path]]:
+    """按实际时长把片段贪心切成多集，保证每集不超过 ``max_minutes``。
+
+    不按片段个数平均分：片段长度差异可达十倍以上（一个 200 字片段 vs 一个
+    15 字片段），按个数分会让某一集远超单集上限。
+
+    单个片段自身就超过上限时不再切分——切开会从句子中间断开，听感更差——
+    该片段单独成集并记录告警，便于事后排查。
+    """
+    limit_seconds = max_minutes * 60.0
+    groups: list[list[Path]] = []
+    current: list[Path] = []
+    current_seconds = 0.0
+
+    for segment, seconds in zip(segments, durations):
+        if current and current_seconds + seconds > limit_seconds:
+            groups.append(current)
+            current = []
+            current_seconds = 0.0
+
+        if not current and seconds > limit_seconds:
+            logger.warning(
+                "单个片段 %.1f 分钟已超过单集上限 %.1f 分钟，无法再切分: %s",
+                seconds / 60.0, max_minutes, segment.name,
+            )
+
+        current.append(segment)
+        current_seconds += seconds
+
+    if current:
+        groups.append(current)
+
+    return groups
+
+
+def _group_minutes(
+    group: list[Path], all_segments: list[Path], durations: list[float]
+) -> float:
+    """返回某一集的时长（分钟），供日志使用。"""
+    index = {id(segment): seconds for segment, seconds in zip(all_segments, durations)}
+    return sum(index.get(id(segment), 0.0) for segment in group) / 60.0

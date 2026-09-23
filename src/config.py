@@ -32,6 +32,8 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     env_map = {
         "VIDEO2LISTENER_DEEPSEEK_API_KEY": ("llm", "api_key"),
         "VIDEO2LISTENER_DEEPSEEK_BASE_URL": ("llm", "base_url"),
+        "VIDEO2LISTENER_FISH_API_KEY": ("tts", "api_key"),
+        "VIDEO2LISTENER_FISH_BASE_URL": ("tts", "base_url"),
         "VIDEO2LISTENER_MIMI_API_KEY": ("tts", "api_key"),
     }
     for env_var, (section, key) in env_map.items():
