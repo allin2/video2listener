@@ -124,7 +124,67 @@ def test_extract_bilibili_with_subtitles(mock_get_cid, mock_bili_get, tmp_path):
 
 def test_router_connectivity():
     # 测试国内平台探活直连（mock 避免外部真实网络抖动）
-    with patch("urllib.request.urlopen") as mock_open:
-        mock_open.return_value = MagicMock()
+    with patch("urllib.request.build_opener") as mock_build:
         ok, msg = router.check_connectivity(Platform.BILIBILI)
         assert ok is True
+    # 必须带空 ProxyHandler 直连，不读环境变量代理
+    handler = mock_build.call_args[0][0]
+    assert handler.proxies == {}
+
+
+def test_fetch_view_prefers_wbi_endpoint_and_falls_back_on_412():
+    from src.sources import bilibili
+
+    calls = []
+
+    def fake_get(path, params):
+        calls.append(path)
+        if path == "/x/web-interface/wbi/view":
+            return None  # 模拟 412
+        return {"code": 0, "data": {"title": "标题", "owner": {"name": "UP"}, "duration": 90}}
+
+    with patch.object(bilibili, "_bili_get", side_effect=fake_get):
+        view = bilibili.fetch_view("BV1xx411c7X5")
+
+    assert calls == ["/x/web-interface/wbi/view", "/x/web-interface/view"]
+    assert view["title"] == "标题" and view["duration"] == 90
+
+
+def test_fetch_view_uses_bilibili_url_for_ytdlp_fallback():
+    from src.sources import bilibili
+
+    ydl = MagicMock()
+    ydl.__enter__.return_value.extract_info.return_value = {"title": "T", "duration": 60}
+    with patch.object(bilibili, "_bili_get", return_value=None), \
+            patch.object(bilibili.yt_dlp, "YoutubeDL", return_value=ydl):
+        view = bilibili.fetch_view("BV1xx411c7X5")
+
+    url = ydl.__enter__.return_value.extract_info.call_args[0][0]
+    assert url == "https://www.bilibili.com/video/BV1xx411c7X5"
+    assert view["duration"] == 60
+
+
+def test_resolve_title_never_sends_non_youtube_ids_to_youtube(tmp_path, monkeypatch):
+    from src.pipeline import orchestrator
+    from src.sources import bilibili
+
+    monkeypatch.setattr(orchestrator.db, "get_episode", lambda vid: None)
+    monkeypatch.setattr(bilibili, "fetch_view", lambda bvid: None)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("不应调用 YouTube yt-dlp")
+
+    monkeypatch.setattr("src.youtube.extractor._try_ydl", forbidden)
+
+    assert orchestrator._resolve_title("BV1xx411c7X5", tmp_path) == "BV1xx411c7X5"
+    assert orchestrator._resolve_title("dy_123", tmp_path) == "dy_123"
+    assert orchestrator._resolve_title("xhs_abc", tmp_path) == "xhs_abc"
+
+
+def test_bilibili_requests_bypass_env_proxy(monkeypatch):
+    from src.sources import bilibili
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    with bilibili._client() as client:
+        assert client._trust_env is False
+    assert bilibili._YDL_DIRECT == {"proxy": ""}

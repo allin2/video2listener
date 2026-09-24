@@ -38,6 +38,15 @@ _USER_AGENT = (
 )
 
 
+def _client(**kwargs) -> httpx.Client:
+    """B站请求一律直连：国内服务无需代理，走代理反而易触发风控或 SSL 中断。"""
+    return httpx.Client(trust_env=False, **kwargs)
+
+
+# yt-dlp 中 proxy 为空串表示强制直连（忽略环境变量代理）
+_YDL_DIRECT = {"proxy": ""}
+
+
 def resolve_bvid(url_or_bvid: str) -> tuple[str, str]:
     """解析并提取 BV 号与标准视频 URL。
 
@@ -54,7 +63,7 @@ def resolve_bvid(url_or_bvid: str) -> tuple[str, str]:
         if not url.startswith("http"):
             url = f"https://{url}"
         try:
-            with httpx.Client(follow_redirects=False, timeout=10.0) as client:
+            with _client(follow_redirects=False, timeout=10.0) as client:
                 resp = client.get(url, headers={"User-Agent": _USER_AGENT})
                 if 300 <= resp.status_code < 400:
                     loc = resp.headers.get("Location", "")
@@ -71,7 +80,7 @@ def resolve_bvid(url_or_bvid: str) -> tuple[str, str]:
 def _bili_get(path: str, params: dict) -> Optional[dict]:
     """请求 B站 公共 API。"""
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with _client(timeout=15.0) as client:
             resp = client.get(
                 f"{_BILI_API}{path}",
                 params=params,
@@ -84,6 +93,40 @@ def _bili_get(path: str, params: dict) -> Optional[dict]:
             return resp.json()
     except Exception as e:
         logger.warning("B站 API %s 请求失败: %s", path, e)
+        return None
+
+
+# 旧接口 /x/web-interface/view 对无 Cookie 请求常返回 412（风控），
+# wbi/view 在不签名时仍可用，故优先；两者都失败才回退 yt-dlp。
+_VIEW_ENDPOINTS = ("/x/web-interface/wbi/view", "/x/web-interface/view")
+
+
+def fetch_view(bvid: str) -> Optional[dict]:
+    """获取视频元数据，返回 {title, channel, duration, pubdate}；全部失败返回 None。"""
+    for path in _VIEW_ENDPOINTS:
+        data = _bili_get(path, {"bvid": bvid})
+        if data and data.get("code") == 0 and data.get("data"):
+            info = data["data"]
+            return {
+                "title": info.get("title") or bvid,
+                "channel": (info.get("owner") or {}).get("name") or "B站UP主",
+                "duration": int(info.get("duration") or 0),
+                "pubdate": int(info.get("pubdate") or 0),
+            }
+
+    logger.warning("B站公共 API 获取元数据失败，回退 yt-dlp...")
+    try:
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True, **_YDL_DIRECT}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.bilibili.com/video/{bvid}", download=False)
+        return {
+            "title": info.get("title") or bvid,
+            "channel": info.get("uploader") or "B站UP主",
+            "duration": int(info.get("duration") or 0),
+            "pubdate": int(info.get("timestamp") or 0),
+        }
+    except Exception as e:
+        logger.warning("yt-dlp 获取 B站元数据失败: %s", e)
         return None
 
 
@@ -114,20 +157,17 @@ def extract_bilibili(
     audio_path = output_dir / f"{bvid}.m4a"
 
     # --- 1. 获取元数据 ---
-    view_data = _bili_get("/x/web-interface/view", {"bvid": bvid})
-    if view_data and view_data.get("code") == 0:
-        info = view_data["data"]
-        title = info.get("title", bvid)
-        channel = (info.get("owner") or {}).get("name", "B站UP主")
-        duration = int(info.get("duration", 0))
-        pub_ts = info.get("pubdate", 0)
+    view = fetch_view(bvid)
+    if view:
+        title = view["title"]
+        channel = view["channel"]
+        duration = view["duration"]
         publish_date = (
-            datetime.fromtimestamp(pub_ts, tz=timezone.utc).strftime("%Y-%m-%d")
-            if pub_ts
+            datetime.fromtimestamp(view["pubdate"], tz=timezone.utc).strftime("%Y-%m-%d")
+            if view["pubdate"]
             else ""
         )
     else:
-        logger.warning("B站公共 API 获取元数据失败，回退 yt-dlp...")
         title = bvid
         channel = "B站"
         duration = 0
@@ -166,7 +206,7 @@ def extract_bilibili(
                     if sub_url.startswith("//"):
                         sub_url = "https:" + sub_url
                     try:
-                        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+                        with _client(timeout=15.0, follow_redirects=True) as client:
                             sub_resp = client.get(sub_url)
                             sub_resp.raise_for_status()
                             sub_json = sub_resp.json()
@@ -229,7 +269,7 @@ def extract_bilibili(
             if audio_stream_url:
                 try:
                     logger.info("开始通过 B站 DASH 流下载纯音频...")
-                    with httpx.Client(
+                    with _client(
                         timeout=120.0,
                         follow_redirects=True,
                         headers={
@@ -256,6 +296,7 @@ def extract_bilibili(
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            **_YDL_DIRECT,
             "format": "bestaudio/best",
             "outtmpl": str(output_dir / f"{bvid}.%(ext)s"),
             "postprocessors": [

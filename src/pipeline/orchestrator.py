@@ -35,8 +35,8 @@ from src.translation.client import (
 )
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize, synthesize_async
-from src.audio.budget import duration_budget, predict_duration
-from src.audio.merger import merge, merge_async
+from src.audio.budget import duration_budget, predict_duration, synthesized_duration_error
+from src.audio.merger import _probe_duration, merge, merge_async
 
 logger = logging.getLogger(__name__)
 
@@ -74,11 +74,13 @@ def _resolve_title(video_id: str, data_dir: Path) -> str:
     # 新视频：先快速获取标题
     try:
         if video_id.startswith("BV"):
-            from src.sources.bilibili import _bili_get
-            data = _bili_get("/x/web-interface/view", {"bvid": video_id})
-            if data and data.get("code") == 0:
-                title = data["data"].get("title", video_id)
-                return _sanitize_filename(title)
+            from src.sources.bilibili import fetch_view
+            view = fetch_view(video_id)
+            return _sanitize_filename(view["title"]) if view else video_id
+        if video_id.startswith(("dy_", "xhs_")):
+            # 非 YouTube ID 不能交给 YouTube 的 yt-dlp（会重试多次后才失败），
+            # 标题由各平台适配器在提取阶段写入 metadata.json
+            return video_id
         from src.youtube.extractor import _try_ydl
         cfg = get_config()
         proxy = cfg.get("network", {}).get("proxy", "")
@@ -706,6 +708,7 @@ async def _process_impl(
 
             progress("开始语音合成...")
             segments = await synthesize_async(tts_text, tts_dir, on_progress=progress, tts_config=tts_config)
+            _check_synthesized_duration(tts_text, segments)
 
             # --- Cancel check before merge ---
             if _check_cancel(cancel_event, progress):
@@ -864,6 +867,19 @@ def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path) -> str:
         )
         logger.warning("时长预算偏离: mode=%s %s", mode, message)
     return message
+
+
+def _check_synthesized_duration(tts_text: str, segments: list[Path]) -> None:
+    """合并前用预估时长校验合成结果，异常时让任务失败而不是产出坏音频。"""
+    try:
+        actual = sum(_probe_duration(Path(segment)) for segment in segments)
+    except Exception:
+        # 读不到时长（缺 ffprobe 等）时跳过，不因检查本身失败而误杀任务
+        logger.warning("无法读取合成片段时长，跳过时长校验", exc_info=True)
+        return
+    error = synthesized_duration_error(predict_duration(tts_text), actual)
+    if error:
+        raise RuntimeError(error)
 
 
 def _should_run(current: TaskStatus, target: TaskStatus) -> bool:

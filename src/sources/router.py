@@ -36,7 +36,8 @@ def check_connectivity(platform: Platform = Platform.YOUTUBE) -> tuple[bool, str
             test_url,
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        urllib.request.urlopen(req, timeout=5)
+        # 空 ProxyHandler 忽略环境变量代理，与 B站适配器的直连策略一致
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5)
         return True, "国内网络连通 ✓"
     except Exception as e:
         logger.warning("国内站点连通性测试失败: %s", e)

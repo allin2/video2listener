@@ -70,3 +70,26 @@ def duration_budget(mode: str, source_seconds: float) -> DurationBudget | None:
     if mode == "podcast":
         return _ratio_budget(source_seconds, 0.55, 1.25)
     return None
+
+
+# 合成后实际时长 / 合成前预估的合理区间。越界说明引擎读了不该读的东西
+# （如把 SSML 标签当文本念出，曾导致约 2 倍）或音频被截断。
+SYNTH_RATIO_MIN = 0.5
+SYNTH_RATIO_MAX = 1.5
+
+
+def synthesized_duration_error(predicted: float, actual: float) -> str | None:
+    """实际合成时长明显偏离预估时返回错误说明，正常返回 None。"""
+    if predicted <= 0:
+        return None
+    ratio = actual / predicted
+    if SYNTH_RATIO_MIN <= ratio <= SYNTH_RATIO_MAX:
+        return None
+    hint = (
+        "可能把标记/标签当文字念了出来，或语速设置异常"
+        if ratio > SYNTH_RATIO_MAX else "可能有片段被截断或为空"
+    )
+    return (
+        f"合成音频时长异常：实际 {actual / 60:.1f} 分钟，预估 {predicted / 60:.1f} 分钟"
+        f"（{ratio:.1f} 倍），{hint}"
+    )
