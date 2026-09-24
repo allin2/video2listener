@@ -502,3 +502,39 @@ def test_api_process_passes_tts_speed(monkeypatch, isolated_web_db):
         assert captured["tts_config"]["speed"] == 1.5
 
 
+
+
+def test_static_assets_are_revalidated_not_heuristically_cached():
+    from fastapi.testclient import TestClient
+
+    from src.web.server import app
+
+    client = TestClient(app)
+    for path in ("/", "/static/js/history.js"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-cache"
+
+
+def test_tasks_expose_platform_thumbnail_and_hide_stale_errors(isolated_web_db, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from src.storage import db
+    from src.web.server import app
+
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+    db.create_episode(video_id="dQw4w9WgXcQ", url="u", mode="podcast", data_dir=str(tmp_path))
+    db.upsert_variant("dQw4w9WgXcQ", "podcast", status="done", audio_zh_path=str(audio),
+                      variant_dir=str(tmp_path), error_message="旧的失败信息")
+    db.create_episode(video_id="BV1xx411c7X5", url="u", mode="podcast", data_dir=str(tmp_path))
+
+    items = {e["video_id"]: e for e in TestClient(app).get("/api/tasks").json()}
+
+    yt = items["dQw4w9WgXcQ"]
+    assert yt["platform"] == "youtube"
+    assert yt["thumbnail_url"] == "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
+    assert yt["variants"][0]["error_message"] == ""
+    assert "output_seconds" in yt["variants"][0]
+    assert items["BV1xx411c7X5"]["platform"] == "bilibili"
+    assert items["BV1xx411c7X5"]["thumbnail_url"] == ""

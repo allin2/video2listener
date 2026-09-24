@@ -406,11 +406,23 @@ def _shared_source_ready(episode: Optional[dict]) -> bool:
 @app.get("/")
 async def serve_ui():
     """返回主界面 HTML。"""
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+class _RevalidatingStaticFiles(StaticFiles):
+    """静态资源每次向服务端校验（命中 ETag 返回 304），前端更新后刷新即生效。
+
+    不带 Cache-Control 时浏览器会按 Last-Modified 启发式缓存，改了 JS 仍跑旧版。
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 # 挂载静态资源目录（CSS/JS/图等），供 index.html 引用。
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", _RevalidatingStaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/api/tasks/{video_id}/{mode}/text")
@@ -945,13 +957,18 @@ async def api_tasks():
             parts = _detect_parts(scan_dir, audio_path)
             for part in parts:
                 part["download_url"] = f"/api/download/{vid}/{mode}?part={quote(part['filename'])}"
+            is_done = variant_status == "done" and audio_path
             variants.append({
                 "mode": mode,
                 "mode_label": MODE_LABELS.get(mode, mode),
                 "status": variant_status,
+                "output_seconds": round(_audio_seconds(
+                    [part["path"] for part in parts] or [audio_path]
+                )) if is_done else 0,
                 "variant_dir": variant.get("variant_dir") or "",
                 "audio_zh_path": audio_path,
-                "error_message": variant.get("error_message") or "",
+                # 已完成的变体可能残留上次失败的报错，不再展示
+                "error_message": "" if is_done else variant.get("error_message") or "",
                 "audit_status": variant.get("audit_status") or "",
                 "audit_message": variant.get("audit_message") or "",
                 "updated_at": variant.get("updated_at") or "",
@@ -961,8 +978,11 @@ async def api_tasks():
 
         variants.sort(key=lambda item: item["updated_at"], reverse=True)
         primary = variants[0] if variants else None
+        platform = _platform_of(vid)
         entry = {
             "video_id": vid,
+            "platform": platform,
+            "thumbnail_url": _thumbnail_url(vid, platform),
             "title_original": ep.get("title_original") or "",
             "channel_name": ep.get("channel_name") or "",
             "mode": primary["mode"] if primary else ep.get("mode", ""),
@@ -981,6 +1001,46 @@ async def api_tasks():
         result.append(entry)
 
     return result
+
+
+_duration_cache: dict[tuple[str, float], float] = {}
+
+
+def _audio_seconds(paths: list[str]) -> float:
+    """产出音频总时长（秒）；按 (路径, 修改时间) 缓存，读不到时返回 0。"""
+    from src.audio.merger import _probe_duration
+
+    total = 0.0
+    for raw in paths:
+        path = Path(raw)
+        try:
+            key = (str(path), path.stat().st_mtime)
+        except OSError:
+            continue
+        if key not in _duration_cache:
+            try:
+                _duration_cache[key] = _probe_duration(path)
+            except Exception:
+                _duration_cache[key] = 0.0
+        total += _duration_cache[key]
+    return total
+
+
+def _platform_of(video_id: str) -> str:
+    if video_id.startswith("BV"):
+        return "bilibili"
+    if video_id.startswith("dy_"):
+        return "douyin"
+    if video_id.startswith("xhs_"):
+        return "xiaohongshu"
+    return "youtube"
+
+
+def _thumbnail_url(video_id: str, platform: str) -> str:
+    # 只有 YouTube 能由 ID 直接拼出封面地址；其他平台前端显示平台占位图
+    if platform == "youtube" and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"
+    return ""
 
 
 def _part_sort_key(path: Path) -> tuple[int, str]:

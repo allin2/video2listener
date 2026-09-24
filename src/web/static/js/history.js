@@ -15,83 +15,111 @@ const $ = (id) => document.getElementById(id);
 
 let cache = [];
 
-const STATUS_BADGE = {
-  done: 'badge--done',
-  processing: 'badge--active',
-  queued: 'badge--active',
-  failed: 'badge--failed',
-  cancelled: 'badge--cancelled',
-};
+const MODE_ORDER = ['podcast', 'faithful', 'condensed'];
 
-/** 模式徽章：已生成 → 实心状态；未生成 → 虚线可点击 */
-function modeBadge(v) {
-  const meta = MODES[v.mode] || { label: v.mode, icon: '', badge: '' };
-  if (v.status === 'done') {
-    return `<span class="badge ${meta.badge || ''}">✓ ${meta.label}</span>`;
-  }
-  if (v.status) {
-    return `<span class="badge ${STATUS_BADGE[v.status] || 'badge--pending'}">${meta.label} ${v.status === 'processing' ? '· 处理中' : v.status === 'queued' ? '· 排队' : ''}</span>`;
-  }
-  return `<button class="badge badge--outline" data-gen="${v.mode}">＋ ${meta.label}</button>`;
-}
+const PLATFORMS = {
+  youtube: { label: 'YouTube', cls: 'thumb--youtube' },
+  bilibili: { label: 'B站', cls: 'thumb--bilibili' },
+  douyin: { label: '抖音', cls: 'thumb--douyin' },
+  xiaohongshu: { label: '小红书', cls: 'thumb--xhs' },
+};
 
 const AUDIT_HTML = {
-  passed: '<span style="color:var(--color-success)">✅ 完整性通过</span>',
-  degraded: '<span style="color:var(--color-warn)">⚠️ 建议抽查</span>',
+  passed: '<span class="tag tag--ok" title="全部片段均已翻译（确定性检查，非逐句语义审计）">完整性通过</span>',
+  degraded: '<span class="tag tag--warn">建议抽查</span>',
 };
 
-function variantRow(v, ep) {
-  const meta = MODES[v.mode] || { label: v.mode, icon: '' };
-  const audit = v.audit_status ? AUDIT_HTML[v.audit_status] || '' : '';
-  const isDone = v.status === 'done' && v.audio_zh_path;
-  const download = v.parts && v.parts.length
-    ? v.parts.map((p) => `<a class="btn btn--ghost btn--sm" href="${p.download_url}">⬇️ ${escHtml(p.filename)}</a>`).join('')
-    : (isDone ? `<a class="btn btn--ghost btn--sm" href="${v.download_url}">⬇️ 下载 MP3</a>` : `<span style="color:var(--color-text-3);font-size:12px">未生成</span>`);
-  return `
-    <div class="variant-row">
-      <span class="badge ${meta.badge || ''}">${meta.icon} ${meta.label}</span>
-      ${audit ? `<span class="audit">${audit}</span>` : ''}
-      <span class="spacer"></span>
-      ${isDone ? `<button class="btn btn--ghost btn--sm" data-play="${v.mode}">▶️ 试听</button>` : ''}
-      ${download}
-      ${v.status && v.status !== 'processing' && v.status !== 'queued' ? `<button class="btn btn--ghost btn--sm" style="color:var(--color-danger)" data-del-variant="${v.mode}">删除</button>` : ''}
-    </div>`;
+function minutes(seconds) {
+  if (!seconds) return '';
+  return seconds < 60 ? '不到 1 分钟' : `${Math.round(seconds / 60)} 分钟`;
+}
+
+/** 报错只取首行并截短，完整内容放 title 悬停查看 */
+function shortError(message) {
+  const first = (message || '').split('\n')[0].trim();
+  return first.length > 40 ? `${first.slice(0, 40)}…` : first;
+}
+
+function downloadLinks(v) {
+  if (v.parts && v.parts.length > 1) {
+    return v.parts.map((p, i) =>
+      `<a class="btn btn--ghost btn--sm" href="${p.download_url}" title="${escHtml(p.filename)}">⬇ 第 ${i + 1} 集</a>`).join('');
+  }
+  const href = v.parts && v.parts.length ? v.parts[0].download_url : v.download_url;
+  return `<a class="btn btn--ghost btn--sm" href="${href}">⬇ 下载</a>`;
+}
+
+/** 单个模式一行：状态决定展示内容与可用操作 */
+function variantRow(v) {
+  const meta = MODES[v.mode] || { label: v.mode, icon: '', badge: '' };
+  const head = `<span class="badge ${meta.badge || ''}">${meta.icon} ${meta.label}</span>`;
+  const del = `<button class="btn btn--ghost btn--sm btn--quiet-danger" data-del-variant="${v.mode}" title="删除该模式产物">删除</button>`;
+  let body;
+  let actions;
+  if (v.status === 'done' && v.audio_zh_path) {
+    const parts = v.parts && v.parts.length > 1 ? ` · ${v.parts.length} 集` : '';
+    body = `<span class="variant-row__info">${minutes(v.output_seconds) || '已完成'}${parts}</span>${AUDIT_HTML[v.audit_status] || ''}`;
+    actions = `<button class="btn btn--ghost btn--sm" data-play="${v.mode}">▶ 试听</button>${downloadLinks(v)}${del}`;
+  } else if (v.status === 'processing' || v.status === 'queued') {
+    body = `<span class="variant-row__info is-active">${v.status === 'queued' ? '排队中…' : '处理中…'}</span>`;
+    actions = '';
+  } else if (v.status === 'failed') {
+    body = `<span class="variant-row__info is-failed" title="${escHtml(v.error_message)}">失败${v.error_message ? `：${escHtml(shortError(v.error_message))}` : ''}</span>`;
+    actions = `<button class="btn btn--ghost btn--sm" data-gen="${v.mode}">↻ 重新生成</button>${del}`;
+  } else {
+    const label = v.status === 'cancelled' ? '已取消' : '未完成';
+    body = `<span class="variant-row__info">${label}</span>`;
+    actions = `<button class="btn btn--ghost btn--sm" data-gen="${v.mode}">继续生成</button>${del}`;
+  }
+  return `<div class="variant-row">${head}<span class="variant-row__body">${body}</span><span class="variant-row__actions">${actions}</span></div>`;
+}
+
+function thumb(ep) {
+  const p = PLATFORMS[ep.platform] || PLATFORMS.youtube;
+  const img = ep.thumbnail_url
+    ? `<img src="${ep.thumbnail_url}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`
+    : '';
+  return `<div class="history-card__thumb ${p.cls}"><span>${p.label}</span>${img}</div>`;
 }
 
 export function renderHistory() {
   const body = $('historyBody');
   body.innerHTML = '';
   if (!cache.length) {
-    body.innerHTML = '<div class="history-empty">暂无历史记录<br>粘贴一条 YouTube 链接，生成你的第一期中概播客吧 🎧</div>';
+    body.innerHTML = '<div class="history-empty">暂无历史记录<br>粘贴一条视频链接，生成你的第一期中文播客吧 🎧</div>';
     return;
   }
   cache.forEach((ep) => {
-    const variants = ep.variants || [];
+    const variants = MODE_ORDER
+      .map((mode) => (ep.variants || []).find((v) => v.mode === mode))
+      .filter(Boolean);
+    const missing = MODE_ORDER.filter((mode) => !variants.some((v) => v.mode === mode));
+    const platform = (PLATFORMS[ep.platform] || PLATFORMS.youtube).label;
+    const titleHtml = ep.title_original
+      ? escHtml(ep.title_original)
+      : `<span class="muted">（标题未知）</span> <span class="history-card__id">${escHtml(ep.video_id)}</span>`;
+    const metaItems = [
+      platform,
+      ep.channel_name ? escHtml(ep.channel_name) : '',
+      ep.duration_seconds ? `原片 ${minutes(ep.duration_seconds)}` : '',
+      (ep.updated_at || '').slice(0, 10),
+    ].filter(Boolean);
+
     const card = document.createElement('div');
-    card.className = 'card';
+    card.className = 'card history-card';
     card.dataset.videoId = ep.video_id;
-    const estMB = ep.duration_seconds ? Math.round((ep.duration_seconds * 128) / 8 / 1024) : null;
     card.innerHTML = `
       <div class="history-card__top">
-        <div class="history-card__thumb t${(variants.length % 3) + 1}">🎬</div>
+        ${thumb(ep)}
         <div class="history-card__info">
-          <div class="history-card__title" title="${escHtml(ep.title_original || ep.video_id)}">${escHtml(ep.title_original || ep.video_id)}</div>
-          <div class="history-card__meta">
-            <span>📺 ${escHtml(ep.channel_name || '未知频道')}</span>
-            <span>⏱ ${ep.duration_seconds ? Math.floor(ep.duration_seconds / 60) + ' 分钟' : '未知'}</span>
-            ${estMB ? `<span>📦 约 ${estMB} MB</span>` : ''}
-            <span>📅 ${(ep.updated_at || '').slice(0, 10)}</span>
-          </div>
+          <div class="history-card__title" title="${escHtml(ep.title_original || ep.video_id)}">${titleHtml}</div>
+          <div class="history-card__meta">${metaItems.map((m) => `<span>${m}</span>`).join('')}</div>
         </div>
-        <button class="btn btn--ghost btn--sm" style="color:var(--color-danger);flex:none" data-del-video="1">删除整条</button>
+        <button class="btn btn--ghost btn--sm btn--quiet-danger history-card__del" data-del-video="1" title="删除该视频及全部模式">删除整条</button>
       </div>
-      <div class="history-card__modes">
-        ${['podcast', 'faithful', 'condensed'].map((mode) => {
-          const v = variants.find((x) => x.mode === mode);
-          return v ? modeBadge(v) : `<button class="badge badge--outline" data-gen="${mode}">＋ ${MODES[mode].label}</button>`;
-        }).join('')}
-      </div>
-      ${variants.length ? `<div class="history-card__variants">${variants.map((v) => variantRow(v, ep)).join('')}</div>` : ''}`;
+      ${variants.length ? `<div class="history-card__variants">${variants.map(variantRow).join('')}</div>` : ''}
+      ${missing.length ? `<div class="history-card__more"><span>还可生成</span>${missing.map((mode) =>
+        `<button class="badge badge--outline" data-gen="${mode}">＋ ${MODES[mode].label}</button>`).join('')}</div>` : ''}`;
     body.appendChild(card);
   });
 }
@@ -142,7 +170,7 @@ export function initHistory() {
       const v = (cache.find((x) => x.video_id === vid) || {}).variants || [];
       const variant = v.find((x) => x.mode === t.dataset.play);
       if (variant && variant.audio_zh_path) {
-        openPlayer({ vid, mode: variant.mode, title: card.querySelector('.history-card__title').textContent, label: MODES[variant.mode].label, parts: variant.parts });
+        openPlayer({ vid, mode: variant.mode, title: card.querySelector('.history-card__title').getAttribute('title'), label: MODES[variant.mode].label, parts: variant.parts });
       }
       return;
     }
