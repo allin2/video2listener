@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.audio.budget import duration_budget
 from src.audio.merger import _resolve_media_tool
 from src.tts.synthesizer import _split_tts_segments
 
@@ -60,15 +61,39 @@ def _normalised_text(text: str) -> str:
     return re.sub(r"\s+", "", text).lower()
 
 
+def _translation_hash_matches(audit: dict, script: str) -> bool:
+    """校验审计记录的译文与当前 script_zh.txt 一致。
+
+    v2 审计有全文哈希；v1 只有逐段哈希，按段落顺序贪心拼接逐段比对。
+    """
+    if audit.get("translation_sha256"):
+        return audit["translation_sha256"] == _sha256(script)
+    expected = [item.get("translation_sha256") for item in audit.get("segments", [])]
+    if not expected or not all(expected):
+        return False
+    pieces = script.split("\n\n")
+    position = 0
+    for digest in expected:
+        for end in range(position + 1, len(pieces) + 1):
+            if _sha256("\n\n".join(pieces[position:end])) == digest:
+                position = end
+                break
+        else:
+            return False
+    return position == len(pieces)
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _assess(metrics: dict[str, object]) -> list[str]:
     """返回违反 PRD 内容验收门槛的原因；空列表表示硬门禁通过。"""
     failures: list[str] = []
     if metrics.get("outputs_exist") != 1:
         failures.append("三种模式的脚本、TTS 文本或 MP3 不完整")
     if metrics.get("translation_audits_complete") != 1:
-        failures.append("缺少逐段翻译审计，无法证明全部源片段均已处理")
-    if metrics.get("faithful_semantic_audit_passed") != 1:
-        failures.append("忠实版缺少通过的双向语义审计")
+        failures.append("缺少逐段翻译审计，或审计与当前译文/原文不一致")
     for mode in MODES:
         if float(metrics.get(f"{mode}_long_english_runs", 0)) > 0:
             failures.append(f"{mode} 存在连续未翻译英文")
@@ -76,12 +101,13 @@ def _assess(metrics: dict[str, object]) -> list[str]:
         failures.append("忠实版中文信息量异常偏低")
     if float(metrics.get("max_mode_similarity", 1)) >= 0.9:
         failures.append("至少两个模式的脚本高度相同")
-    condensed_ratio = float(metrics.get("condensed_to_faithful_duration_ratio", 0))
-    if not 0.25 <= condensed_ratio <= 0.55:
-        failures.append("浓缩版时长不在忠实版的 25%–55% 范围")
-    podcast_ratio = float(metrics.get("podcast_to_faithful_duration_ratio", 0))
-    if not 0.5 <= podcast_ratio <= 1.2:
-        failures.append("播客版时长相对忠实版异常")
+    if float(metrics.get("source_duration_seconds", 0)) <= 0:
+        failures.append("metadata.json 缺少原视频时长，无法校验时长预算")
+    else:
+        if metrics.get("condensed_duration_within_gate") != 1:
+            failures.append("浓缩版时长超出相对原视频的预算区间")
+        if metrics.get("podcast_duration_within_gate") != 1:
+            failures.append("播客版时长相对原视频异常")
     return failures
 
 
@@ -104,7 +130,6 @@ def evaluate(episode_dir: Path) -> dict[str, object]:
     max_segment_chars = 0
     outputs_exist = 1
     completed_audits = 0
-    faithful_semantic_audit_passed = 0
     faithful_audit_status = "missing"
     result: dict[str, object] = {}
 
@@ -126,32 +151,19 @@ def evaluate(episode_dir: Path) -> dict[str, object]:
             try:
                 audit = json.loads(audit_path.read_text(encoding="utf-8"))
                 current_script = script_path.read_text(encoding="utf-8")
-                translation_hash_matches = (
-                    not audit.get("translation_sha256")
-                    or audit.get("translation_sha256")
-                    == hashlib.sha256(current_script.encode("utf-8")).hexdigest()
-                )
+                translation_hash_matches = _translation_hash_matches(audit, current_script)
                 if (
                     audit.get("all_segments_present") is True
                     and audit.get("source_segment_count")
                     == audit.get("translation_segment_count")
                     and audit.get("source_sha256")
-                    == hashlib.sha256(source.encode("utf-8")).hexdigest()
+                    == _sha256(source)
                     and translation_hash_matches
                 ):
                     completed_audits += 1
                     if mode == "faithful":
-                        semantic = audit.get("semantic_audit") or {}
-                        faithful_audit_status = (
-                            audit.get("quality_status") or semantic.get("status") or "unknown"
-                        )
-                        faithful_semantic_audit_passed = int(
-                            faithful_audit_status == "passed"
-                            and semantic.get("passed") is True
-                            and semantic.get("checked_segments")
-                            == audit.get("source_segment_count")
-                            and semantic.get("failed_segments") == 0
-                        )
+                        # 证据指标，不作为门禁（v1 审计无此字段）
+                        faithful_audit_status = audit.get("quality_status") or "legacy_v1"
             except (OSError, json.JSONDecodeError):
                 pass
 
@@ -189,7 +201,6 @@ def evaluate(episode_dir: Path) -> dict[str, object]:
     result.update({
         "outputs_exist": outputs_exist,
         "translation_audits_complete": int(completed_audits == len(MODES)),
-        "faithful_semantic_audit_passed": faithful_semantic_audit_passed,
         "faithful_audit_status": faithful_audit_status,
         "tts_requests_total": sum(request_counts.values()),
         "tts_requests_faithful": request_counts.get("faithful", 0),
@@ -203,13 +214,18 @@ def evaluate(episode_dir: Path) -> dict[str, object]:
         "faithful_duration_seconds": round(durations.get("faithful", 0), 3),
         "podcast_duration_seconds": round(durations.get("podcast", 0), 3),
         "condensed_duration_seconds": round(durations.get("condensed", 0), 3),
-        "condensed_to_faithful_duration_ratio": round(
-            durations.get("condensed", 0) / max(1.0, durations.get("faithful", 0)), 4
-        ),
-        "podcast_to_faithful_duration_ratio": round(
-            durations.get("podcast", 0) / max(1.0, durations.get("faithful", 0)), 4
-        ),
     })
+    for mode in MODES:
+        result[f"{mode}_to_source_duration_ratio"] = round(
+            durations.get(mode, 0) / max(1.0, source_duration), 4
+        )
+    for mode in ("condensed", "podcast"):
+        budget = duration_budget(mode, source_duration)
+        seconds = durations.get(mode, 0)
+        result[f"{mode}_duration_within_gate"] = int(bool(budget and budget.within_gate(seconds)))
+        result[f"{mode}_duration_within_target"] = int(
+            bool(budget and budget.within_target(seconds))
+        )
     failures = _assess(result)
     result["validation_passed"] = int(not failures)
     result["quality_failure_count"] = len(failures)

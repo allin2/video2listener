@@ -332,10 +332,10 @@ async function renderResult({ vid, mode, title, audit_status, audit_message }) {
     ab.hidden = false;
     if (audit_status === 'passed') {
       ab.className = 'audit-banner audit-banner--passed';
-      ab.innerHTML = '<span style="font-size:18px">✅</span><span><b>忠实翻译质量审计完全通过</b> — 数字、术语、篇幅完整匹配，可放心收听。</span>';
+      ab.innerHTML = `<span style="font-size:18px">✅</span><span><b>完整性检查通过</b> — ${escHtml(audit_message || '全部片段均已翻译')}。仅做确定性检查，未逐句语义审计。</span>`;
     } else if (audit_status === 'degraded') {
       ab.className = 'audit-banner audit-banner--degraded';
-      ab.innerHTML = `<span style="font-size:18px">⚠️</span><span><b>质量审计降级</b> — ${escHtml(audit_message || '音频已成功生成可下载，但部分语义校验未达到严格阈值')}</span>`;
+      ab.innerHTML = `<span style="font-size:18px">⚠️</span><span><b>建议抽查</b> — ${escHtml(audit_message || '音频已生成可下载，但部分确定性检查未达阈值')}</span>`;
     } else {
       ab.hidden = true;
     }

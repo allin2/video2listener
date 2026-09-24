@@ -36,8 +36,8 @@ function modeBadge(v) {
 }
 
 const AUDIT_HTML = {
-  passed: '<span style="color:var(--color-success)">✅ 审计通过</span>',
-  degraded: '<span style="color:var(--color-warn)">⚠️ 审计降级</span>',
+  passed: '<span style="color:var(--color-success)">✅ 完整性通过</span>',
+  degraded: '<span style="color:var(--color-warn)">⚠️ 建议抽查</span>',
 };
 
 function variantRow(v, ep) {

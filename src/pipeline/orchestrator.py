@@ -35,6 +35,7 @@ from src.translation.client import (
 )
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize, synthesize_async
+from src.audio.budget import duration_budget, predict_duration
 from src.audio.merger import merge, merge_async
 
 logger = logging.getLogger(__name__)
@@ -582,8 +583,9 @@ async def _process_impl(
             if source_lang == "zh" and mode == "faithful":
                 progress("忠实模式：保留中文原意，规整文稿...")
                 script_zh = clean_text_content
+                # 中文源的忠实模式不经过翻译，没有可审计的译文
                 translation_audit = {
-                    "quality_status": "passed",
+                    "quality_status": "not_applicable",
                     "source_language": "zh",
                     "mode": "faithful",
                 }
@@ -609,19 +611,11 @@ async def _process_impl(
                 json.dumps(translation_audit, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            # 缺少 quality_status 时不能默认「通过」——未执行的检查不给出通过声明
             audit_status = translation_audit.get(
-                "quality_status", "not_applicable" if mode != "faithful" else "passed"
+                "quality_status", "unknown" if mode == "faithful" else "not_applicable"
             )
-            semantic_audit = translation_audit.get("semantic_audit") or {}
-            technical_reasons = [
-                item.get("technical_error", "")
-                for item in semantic_audit.get("segments", [])
-                if item.get("status") == "technical_unavailable"
-            ]
-            audit_message = (
-                "质量审计降级：" + "; ".join(filter(None, technical_reasons))[:240]
-                if audit_status == "degraded" else ""
-            )
+            audit_message = translation_audit.get("quality_message", "")
             _cleanup_variant_outputs(target_dir, resume_from="translated")
 
             # 标记翻译完成，管道即刻进入下一阶段
@@ -705,6 +699,7 @@ async def _process_impl(
             tts_text = clean_for_tts(script_zh)
             tts_text_path = target_dir / "tts_text.txt"
             tts_text_path.write_text(tts_text, encoding="utf-8")
+            progress(_duration_estimate_message(mode, tts_text, data_dir))
 
             tts_dir = target_dir / "tts_segments"
             tts_dir.mkdir(exist_ok=True)
@@ -845,6 +840,30 @@ async def _process_impl(
             "output_path": None,
             "message": error_msg,
         }
+
+
+def _source_duration_seconds(data_dir: Path) -> float:
+    try:
+        meta = json.loads((data_dir / "metadata.json").read_text(encoding="utf-8"))
+        return float(meta.get("duration_seconds") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0.0
+
+
+def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path) -> str:
+    """合成前预估时长；超出该模式相对原视频的目标区间时提示（不阻塞）。"""
+    estimate = predict_duration(tts_text)
+    message = f"预计音频时长约 {estimate / 60:.1f} 分钟"
+    source_seconds = _source_duration_seconds(data_dir)
+    if source_seconds > 0:
+        message += f"（原视频 {source_seconds / 60:.1f} 分钟）"
+    budget = duration_budget(mode, source_seconds)
+    if budget and not budget.within_target(estimate):
+        message += (
+            f"，偏离目标 {budget.target_min / 60:.0f}–{budget.target_max / 60:.0f} 分钟"
+        )
+        logger.warning("时长预算偏离: mode=%s %s", mode, message)
+    return message
 
 
 def _should_run(current: TaskStatus, target: TaskStatus) -> bool:

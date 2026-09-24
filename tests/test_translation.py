@@ -1,5 +1,6 @@
 """U4 测试。翻译和摘要模块。"""
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -219,3 +220,37 @@ def test_translation_audit_rejects_segment_count_mismatch():
         _build_translation_audit("source", "faithful", ["one", "two"], ["一个"])
 
 
+
+
+def test_faithful_audit_reports_deterministic_quality_status():
+    audit = _build_translation_audit(
+        "It has 11 users.\n\nIt has 50,000 stars.",
+        "faithful",
+        ["It has 11 users.", "It has 50,000 stars."],
+        ["它有十一位用户。", "它有五万颗星。"],
+    )
+
+    assert audit["quality_status"] == "passed"
+    assert audit["numeric_recall"] == 1.0
+    assert "全部 2 段均已翻译" in audit["quality_message"]
+    assert audit["translation_sha256"] == hashlib.sha256(
+        "它有十一位用户。\n\n它有五万颗星。".encode("utf-8")
+    ).hexdigest()
+
+
+def test_faithful_audit_degrades_when_many_numbers_missing():
+    audit = _build_translation_audit(
+        "Numbers 11, 22 and 33.",
+        "faithful",
+        ["Numbers 11, 22 and 33."],
+        ["一些数字。"],
+    )
+
+    assert audit["quality_status"] == "degraded"
+    assert "11" in audit["quality_message"]
+
+
+def test_non_faithful_audit_quality_is_not_applicable():
+    audit = _build_translation_audit("Numbers 11.", "condensed", ["Numbers 11."], ["数字。"])
+
+    assert audit["quality_status"] == "not_applicable"

@@ -208,6 +208,8 @@ audit.get("quality_status") or semantic.get("status") or "unknown"
 
 ### 两个候选方向（请选择）
 
+> **2026-09-24 决定：方向 A。** 已实现：审计产物 v2 带确定性 `quality_status` 和全文 `translation_sha256`（T3、T4 一并修复，v1 审计按逐段哈希校验）；验收门禁去掉语义审计依赖；新增 `tests/test_evaluate_mode_outputs.py`。
+
 **方向 A：以代码现状为准（推荐）**
 验收脚本对齐已落地的三层策略：删除对已移除的 `semantic_audit` 的依赖，把确定性指标（审计完整性、无连续英文、汉字/词比、数字召回）作为门禁，把语义审计状态降级为**证据指标**（与 best-practice 文档"记录为证据，不作为阻塞失败"一致）。
 

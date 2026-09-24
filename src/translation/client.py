@@ -159,15 +159,60 @@ def _build_translation_audit(
             "missing_numbers": sorted(missing_numbers),
         })
 
+    source_number_total = sum(len(item["source_numbers"]) for item in items)
+    missing_number_total = sum(len(item["missing_numbers"]) for item in items)
+    numeric_recall = (
+        1 - missing_number_total / source_number_total if source_number_total else 1.0
+    )
+    quality_status, quality_message = _deterministic_quality(
+        mode, len(items), source_number_total, missing_number_total, numeric_recall, items,
+    )
+
     return {
-        "version": 1,
+        "version": 2,
         "mode": mode,
         "source_sha256": _sha256_text(source),
+        # 与写入 script_zh.txt 的全文一致，供验收脚本校验译文是否被改动
+        "translation_sha256": _sha256_text("\n\n".join(translated_segments)),
         "source_segment_count": len(source_segments),
         "translation_segment_count": len(translated_segments),
         "all_segments_present": len(source_segments) == len(translated_segments),
+        "numeric_recall": round(numeric_recall, 4),
+        "missing_number_total": missing_number_total,
+        # 仅确定性检查（零 API 成本）；逐句 LLM 语义审计已按设计移除，
+        # 见 docs/solutions/best-practices/avoid-blocking-llm-audit-loops.md
+        "quality_status": quality_status,
+        "quality_message": quality_message,
         "segments": items,
     }
+
+
+# 忠实模式下原文数字保留率低于此值时标记为 degraded（不阻塞，只提示）
+FAITHFUL_NUMERIC_RECALL_WARN = 0.8
+
+
+def _deterministic_quality(
+    mode: str,
+    segment_count: int,
+    source_number_total: int,
+    missing_number_total: int,
+    numeric_recall: float,
+    items: list[dict],
+) -> tuple[str, str]:
+    """根据确定性证据给出忠实模式的质量状态；其他模式不适用。"""
+    if mode != "faithful":
+        return "not_applicable", ""
+    numbers_note = (
+        f"原文数字保留 {source_number_total - missing_number_total}/{source_number_total}"
+        if source_number_total else "原文无数字"
+    )
+    if numeric_recall < FAITHFUL_NUMERIC_RECALL_WARN:
+        examples = [n for item in items for n in item["missing_numbers"]][:5]
+        return "degraded", (
+            f"全部 {segment_count} 段均已翻译，但{numbers_note}"
+            f"（缺失如 {', '.join(examples)}），建议抽查相关段落"
+        )
+    return "passed", f"全部 {segment_count} 段均已翻译，{numbers_note}"
 
 
 def _numbers_in_text(text: str) -> set[str]:
