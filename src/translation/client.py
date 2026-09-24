@@ -95,6 +95,19 @@ def _make_batches(segments: list[str], batch_size: int) -> list[list[str]]:
 
 BATCH_DELIMITER = "---SEGMENT---"
 TRANSLATION_MAX_WORDS = 500
+# 浓缩版单段上限（折算英文词）。约 3000 汉字，足够保留局部论证结构
+CONDENSED_MAX_WORDS = 1500
+
+
+def _condensed_position_note(idx: int, total: int) -> str:
+    """浓缩版分段并行时告诉模型当前片段位置，避免每段都开场/总结。"""
+    if idx == 0:
+        role = "这是开头部分：可以用一两句话简短引入主题，但不要写总结或告别语。"
+    elif idx == total - 1:
+        role = "这是结尾部分：不要写开场白，直接承接上文，最后用一小段总结收束全篇。"
+    else:
+        role = "这是中间部分：不要写开场白、预告或总结，直接承接上文展开。"
+    return f"\n【片段位置】全文共 {total} 段，当前第 {idx + 1} 段。{role}\n"
 TRANSLATION_MAX_SPLIT_DEPTH = 5
 
 class TranslationTruncatedError(RuntimeError):
@@ -323,32 +336,54 @@ def _ensure_response_complete(response) -> None:
 
 
 
+_HAN_RE = re.compile(r"[\u4e00-\u9fff]")
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
 def _segment_unit_count(piece: str) -> int:
-    words = piece.split()
-    if len(words) <= 1 and len(piece) > 10:
-        return len(piece) // 2
-    return len(words)
+    """折算为「英文词」单位：含汉字的 token 按汉字每 2 个算 1（夹带的英文/数字串各算 1），
+    纯英文 token 算 1。
+
+    不能按空格数词：Whisper 中文转写在短语间加空格，按空格数会把
+    3 万字低估成几千「词」，导致长稿不被切分。
+    """
+    total = 0
+    for token in piece.split():
+        han = len(_HAN_RE.findall(token))
+        if han:
+            total += len(_LATIN_TOKEN_RE.findall(token)) + (han + 1) // 2
+        else:
+            total += 1  # 纯英文按空格数词，与历史切分保持一致
+    return total
 
 
 def _split_translation_segments(text: str, max_words: int = TRANSLATION_MAX_WORDS) -> list[str]:
-    """按单词或汉字上限切分翻译输入，超长单段也必须继续拆分。"""
+    """按折算单位上限切分翻译输入，超长单段也必须继续拆分。"""
     if max_words <= 0:
         raise ValueError("max_words must be positive")
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     pieces: list[str] = []
     for paragraph in paragraphs:
-        words = paragraph.split()
-        if not words:
-            continue
-        # 中文长段落（空格很少但字符多）
-        if len(words) <= 1 and len(paragraph) > max_words * 2:
+        tokens: list[str] = []
+        for token in paragraph.split():
+            # 无空格的超长中文 token 先按字符切开
             step = max_words * 2
-            for start in range(0, len(paragraph), step):
-                pieces.append(paragraph[start:start + step])
-        else:
-            for start in range(0, len(words), max_words):
-                pieces.append(" ".join(words[start:start + max_words]))
+            if _segment_unit_count(token) > max_words:
+                tokens.extend(token[i:i + step] for i in range(0, len(token), step))
+            else:
+                tokens.append(token)
+        current_tokens: list[str] = []
+        current_units = 0
+        for token in tokens:
+            units = _segment_unit_count(token) or 1
+            if current_tokens and current_units + units > max_words:
+                pieces.append(" ".join(current_tokens))
+                current_tokens, current_units = [], 0
+            current_tokens.append(token)
+            current_units += units
+        if current_tokens:
+            pieces.append(" ".join(current_tokens))
 
     segments: list[str] = []
     current: list[str] = []
@@ -837,6 +872,7 @@ async def translate_async(
     cancel_event: Optional[asyncio.Event] = None,
     on_audit: Optional[Callable[[dict], None]] = None,
     source_language: str = "en",
+    extra_instruction: str = "",
 ) -> str:
     """异步并发翻译/重写入口。
 
@@ -893,14 +929,20 @@ async def translate_async(
     glossary_str = _load_glossary()
     if glossary_str:
         meta_str = meta_str + "\n" + glossary_str + "\n"
+    if extra_instruction:
+        # 如浓缩篇幅超标后的重写反馈，对每个片段都生效
+        meta_str = meta_str + "\n" + extra_instruction + "\n"
 
-    # 忠实版和播客版使用短片段并发处理；浓缩版需要看到全局上下文，
-    # 在常见视频长度下合并为单次请求，避免每个批次重复开场和总结。
+    # 各模式都分段并发。浓缩版片段更大以保留局部上下文，并通过位置说明
+    # 约束只有首段开场、末段总结（见 _condensed_position_note）。
     translation_cfg = cfg.get("translation", {})
     faithful_max_words = int(
         translation_cfg.get("faithful_max_words", TRANSLATION_MAX_WORDS)
     )
-    segment_words = 6000 if mode == "condensed" else faithful_max_words
+    condensed_max_words = int(
+        translation_cfg.get("condensed_max_words", CONDENSED_MAX_WORDS)
+    )
+    segment_words = condensed_max_words if mode == "condensed" else faithful_max_words
     segments = _split_translation_segments(text, max_words=segment_words)
     total = len(segments)
 
@@ -939,9 +981,12 @@ async def translate_async(
             await limiter.acquire()
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("翻译被用户取消")
+            batch_meta = meta_str
+            if mode == "condensed" and len(batches) > 1:
+                batch_meta = meta_str + _condensed_position_note(idx, len(batches))
             result = await _translate_batch_async(
                 client=client, model_name=model_name, prompt_template=prompt_template,
-                meta_str=meta_str, batch=batch, batch_idx=idx, total_batches=len(batches),
+                meta_str=batch_meta, batch=batch, batch_idx=idx, total_batches=len(batches),
                 cfg=cfg, retries=retries, backoff=backoff, cancel_event=cancel_event,
             )
             if on_progress:

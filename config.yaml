@@ -21,6 +21,7 @@ translation:
   max_concurrency: 10          # 最大并发 API 调用数
   rate_limit_rpm: 120          # token-bucket 速率限制（每分钟）
   faithful_max_words: 500      # 忠实翻译初始片段上限，避免输出截断
+  condensed_max_words: 1500    # 浓缩版单段上限（折算英文词，约 3000 汉字），分段并行
   audit_max_words: 250         # 单次语义审计英文词数上限
   audit_max_tokens: 512        # 审计仅返回精简 JSON；截断时拆小而非原样重试
 

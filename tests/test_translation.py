@@ -254,3 +254,54 @@ def test_non_faithful_audit_quality_is_not_applicable():
     audit = _build_translation_audit("Numbers 11.", "condensed", ["Numbers 11."], ["数字。"])
 
     assert audit["quality_status"] == "not_applicable"
+
+
+def test_chinese_units_count_han_chars_not_space_separated_phrases():
+    from src.translation.client import _segment_unit_count
+
+    # Whisper 中文转写在短语间加空格：3 个短语 12 个汉字应折算为 6，而非 3
+    assert _segment_unit_count("今天我们 聊一聊笔记 工具") == 5 + 1  # 11 汉字 → 6
+    assert _segment_unit_count("用 GPT4 写代码") == 1 + 1 + 2
+    assert _segment_unit_count("don't stop 50,000 times") == 4
+
+
+def test_long_chinese_transcript_is_split_for_parallel_condensing():
+    phrase = "这是一个用于测试切分的中文短语"  # 15 汉字 → 8 单位
+    text = " ".join([phrase] * 600)  # 4800 单位
+    segments = _split_translation_segments(text, max_words=1500)
+
+    assert len(segments) == 4
+    assert "".join(segments).replace(" ", "").replace("\n", "") == phrase * 600
+
+
+def test_condensed_position_note_limits_intro_and_summary():
+    from src.translation.client import _condensed_position_note
+
+    assert "可以用一两句话简短引入" in _condensed_position_note(0, 3)
+    assert "不要写开场白、预告或总结" in _condensed_position_note(1, 3)
+    assert "总结收束全篇" in _condensed_position_note(2, 3)
+
+
+def test_condensed_batches_receive_position_notes(monkeypatch):
+    monkeypatch.setattr(
+        "src.translation.client._resolve_llm_async",
+        lambda _config: (object(), "test-model", "test-key"),
+    )
+    monkeypatch.setattr("src.translation.client._load_prompt", lambda _filename: "{{content}}")
+    monkeypatch.setattr("src.translation.client._load_glossary", lambda: "")
+    monkeypatch.setattr(
+        "src.translation.client._split_translation_segments",
+        lambda _text, max_words: ["第一段原文", "第二段原文"],
+    )
+    monkeypatch.setattr("src.translation.client._validate_translation_output", lambda *a: None)
+    seen = {}
+
+    async def fake_batch(**kwargs):
+        seen[kwargs["batch_idx"]] = kwargs["meta_str"]
+        return [f"浓缩稿{kwargs['batch_idx']}"]
+
+    monkeypatch.setattr("src.translation.client._translate_batch_async", fake_batch)
+
+    asyncio.run(translate_async("source", mode="condensed", source_language="zh"))
+
+    assert "当前第 1 段" in seen[0] and "当前第 2 段" in seen[1]

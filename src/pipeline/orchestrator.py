@@ -8,7 +8,7 @@ import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from src.config import get_config
 from src.storage import db
@@ -35,7 +35,12 @@ from src.translation.client import (
 )
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize, synthesize_async
-from src.audio.budget import duration_budget, predict_duration, synthesized_duration_error
+from src.audio.budget import (
+    condensed_overshoot,
+    duration_budget,
+    predict_duration,
+    synthesized_duration_error,
+)
 from src.audio.merger import _probe_duration, merge, merge_async
 
 logger = logging.getLogger(__name__)
@@ -604,6 +609,27 @@ async def _process_impl(
                     on_audit=translation_audit.update,
                     source_language=source_lang,
                 )
+                if mode == "condensed":
+                    async def rewrite(instruction: str) -> tuple[str, dict]:
+                        retry_audit: dict = {}
+                        text = await llm_translate_async(
+                            clean_text_content,
+                            mode,
+                            metadata,
+                            on_progress=progress,
+                            llm_config=llm_config,
+                            cancel_event=cancel_event,
+                            on_audit=retry_audit.update,
+                            source_language=source_lang,
+                            extra_instruction=instruction,
+                        )
+                        return text, retry_audit
+
+                    script_zh, chosen_audit = await _rewrite_if_condensed_too_long(
+                        script_zh, clean_text_content, source_lang, data_dir, progress, rewrite,
+                    )
+                    if chosen_audit is not None:
+                        translation_audit = chosen_audit
             _validate_translation_output(clean_text_content, script_zh, mode)
             _ensure_distinct_mode_script(video_id, mode, script_zh)
             script_path = target_dir / "script_zh.txt"
@@ -867,6 +893,39 @@ def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path) -> str:
         )
         logger.warning("时长预算偏离: mode=%s %s", mode, message)
     return message
+
+
+async def _rewrite_if_condensed_too_long(
+    script: str,
+    source_text: str,
+    source_lang: str,
+    data_dir: Path,
+    progress: Callable[[str], None],
+    rewrite: Callable[[str], Awaitable[tuple[str, dict]]],
+) -> tuple[str, Optional[dict]]:
+    """浓缩稿超出篇幅预算时带反馈重写一次；仍超标则取较短版本并提示，不让任务失败。
+
+    返回 (文稿, 审计)。审计为 None 表示沿用首版审计；采用重写版时返回其审计，
+    保证写盘的文稿与审计哈希一致。
+    """
+    source_seconds = _source_duration_seconds(data_dir)
+    feedback = condensed_overshoot(source_text, script, source_lang, source_seconds)
+    if not feedback:
+        return script, None
+    progress(f"浓缩篇幅超标：{feedback}，重写一次...")
+    retried, retried_audit = await rewrite(
+        f"【篇幅要求】{feedback}。请更大幅度地提炼：只保留最核心的观点、论证和关键案例，"
+        "合并重复表达，把篇幅控制在目标范围内。"
+    )
+    remaining = condensed_overshoot(source_text, retried, source_lang, source_seconds)
+    if remaining:
+        progress(f"重写后仍超标：{remaining}，保留较短版本继续")
+        logger.warning("浓缩重写后仍超标: %s", remaining)
+    else:
+        progress("重写后篇幅已达标")
+    if len(retried) <= len(script):
+        return retried, retried_audit
+    return script, None
 
 
 def _check_synthesized_duration(tts_text: str, segments: list[Path]) -> None:

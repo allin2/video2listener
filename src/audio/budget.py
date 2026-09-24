@@ -17,6 +17,9 @@ CHARS_PER_SECOND = 5.66
 # 超过此时长的原视频，浓缩版改以绝对时长为目标（见 CONCEPTS.md）
 LONG_SOURCE_SECONDS = 60 * 60
 
+# 英文原稿折算中文字数：1 词 ≈ 1.85 字（9_Free 忠实版实测 10779 字 / 5841 词）
+ZH_CHARS_PER_EN_WORD = 1.85
+
 # 验收门禁在目标区间外留的余量
 _RATIO_TOLERANCE = 0.05
 _LONG_TOLERANCE_SECONDS = 5 * 60
@@ -93,3 +96,43 @@ def synthesized_duration_error(predicted: float, actual: float) -> str | None:
         f"合成音频时长异常：实际 {actual / 60:.1f} 分钟，预估 {predicted / 60:.1f} 分钟"
         f"（{ratio:.1f} 倍），{hint}"
     )
+
+
+# 无原视频时长时的篇幅上界，与时长门禁上界（50% + 余量）一致
+_CONDENSED_TEXT_RATIO_MAX = 0.50 + _RATIO_TOLERANCE
+
+
+def _content_units(text: str, source_language: str) -> float:
+    """原稿篇幅折算为中文字数，便于与中文产出稿直接比较。"""
+    if source_language == "en":
+        return len(text.split()) * ZH_CHARS_PER_EN_WORD
+    return float(len(_WHITESPACE_RE.sub("", text)))
+
+
+def condensed_overshoot(
+    source_text: str,
+    output_text: str,
+    source_language: str,
+    source_seconds: float,
+) -> str | None:
+    """浓缩稿篇幅超出预算时返回给模型的反馈，未超标返回 None。
+
+    有原视频时长时按预估音频时长判断；否则退回按文字篇幅比。
+    """
+    budget = duration_budget("condensed", source_seconds)
+    if budget:
+        estimate = predict_duration(output_text)
+        if estimate <= budget.gate_max:
+            return None
+        return (
+            f"上一版预计 {estimate / 60:.0f} 分钟，约为原视频（{source_seconds / 60:.0f} 分钟）的 "
+            f"{estimate / source_seconds:.0%}，目标是 {budget.target_min / 60:.0f}–"
+            f"{budget.target_max / 60:.0f} 分钟"
+        )
+    source_units = _content_units(source_text, source_language)
+    if source_units <= 0:
+        return None
+    ratio = len(_WHITESPACE_RE.sub("", output_text)) / source_units
+    if ratio <= _CONDENSED_TEXT_RATIO_MAX:
+        return None
+    return f"上一版篇幅约为原文的 {ratio:.0%}，目标是 30%–50%"
