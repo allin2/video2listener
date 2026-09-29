@@ -184,6 +184,36 @@ def _raised_max_tokens(cfg: dict, current: int) -> Optional[int]:
     return min(current * 3, cap)
 
 
+def _complete_with_reasoning_budget(client, cfg: dict, **kwargs):
+    """同步补全调用：思考型模型的思考内容计入 max_tokens，小额度会被思考耗尽、正文为空。
+
+    若 finish_reason == "length" 且思考内容占大头（判定比例与
+    _ensure_response_complete 的 reasoning_exhausted 一致），用
+    _raised_max_tokens 提额重试，直到达到 llm.reasoning_max_tokens 上限。
+    思考内容在 message.reasoning_content 字段里，字段不存在时视为空。
+    """
+    budget = kwargs.get("max_tokens") or 0
+    while True:
+        response = client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) != "length":
+            return response
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None) or ""
+        reasoning = getattr(message, "reasoning_content", None) or ""
+        if not reasoning or len(content) >= len(reasoning) * _REASONING_EXHAUSTED_RATIO:
+            return response
+        raised = _raised_max_tokens(cfg, budget)
+        if not raised:
+            return response
+        logger.warning(
+            "Reasoning exhausted max_tokens=%d (reasoning_chars=%d, content_chars=%d); retrying with %d",
+            budget, len(reasoning), len(content), raised,
+        )
+        kwargs["max_tokens"] = raised
+        budget = raised
+
+
 class TranslationQualityError(RuntimeError):
     """模型返回了空内容、未翻译原文或未通过语义质量检查。"""
 
@@ -1190,7 +1220,8 @@ def summarize(
 
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
+            response = _complete_with_reasoning_budget(
+                client, cfg,
                 model=model_name,
                 messages=[
                     {"role": "system", "content": "你是一个专业的中文播客编辑。请只输出 JSON。"},
@@ -1339,7 +1370,8 @@ def _quality_check(
             f"\n\n原文:\n{source_sample}\n\n译文:\n{translated_sample}"
         )
 
-        response = client.chat.completions.create(
+        response = _complete_with_reasoning_budget(
+            client, get_config(),
             model=model_name,
             messages=[
                 {"role": "system", "content": "你是一个专业的中文翻译质量审核员。请只输出 JSON。"},

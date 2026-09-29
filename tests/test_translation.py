@@ -11,6 +11,7 @@ from src.translation.client import (
     TranslationQualityError,
     TranslationTruncatedError,
     _build_translation_audit,
+    _complete_with_reasoning_budget,
     _ensure_response_complete,
     _format_batch_source,
     _load_prompt,
@@ -483,3 +484,87 @@ def test_chinese_source_uses_rewriter_role_not_translator_role(monkeypatch):
     asyncio.run(tc.translate_async("source", mode="podcast", source_language="en"))
 
     assert seen[0].startswith("改写角色|") and seen[1].startswith("翻译角色|")
+
+
+def test_reasoning_budget_retries_with_raised_max_tokens_when_thinking_exhausts_quota():
+    """思考型模型第一次只有思考内容且被截断时，应提额重试并拿到结果。"""
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs["max_tokens"])
+            if len(self.calls) == 1:
+                return SimpleNamespace(choices=[SimpleNamespace(
+                    finish_reason="length",
+                    message=SimpleNamespace(content="", reasoning_content="思考" * 500),
+                )])
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content='{"title_zh": "标题", "summary": "摘要"}'),
+            )])
+
+    completions = FakeCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    cfg = {"llm": {"reasoning_max_tokens": 32768}}
+
+    response = _complete_with_reasoning_budget(
+        client, cfg, model="deepseek-flash", messages=[], max_tokens=1024,
+    )
+
+    assert completions.calls == [1024, 3072]
+    assert response.choices[0].finish_reason == "stop"
+    assert json.loads(response.choices[0].message.content)["title_zh"] == "标题"
+
+
+def test_reasoning_budget_calls_once_for_non_reasoning_model():
+    """非思考型模型正常返回时只调用一次，不触发提额。"""
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content="普通回答"),
+            )])
+
+    completions = FakeCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    cfg = {"llm": {"reasoning_max_tokens": 32768}}
+
+    response = _complete_with_reasoning_budget(
+        client, cfg, model="deepseek-chat", messages=[], max_tokens=1024,
+    )
+
+    assert completions.calls == 1
+    assert response.choices[0].message.content == "普通回答"
+
+
+def test_reasoning_budget_stops_at_reasoning_max_tokens_cap():
+    """思考反复耗尽额度时按阶梯提额，到 llm.reasoning_max_tokens 上限即止，不无限重试。"""
+
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs["max_tokens"])
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(content="", reasoning_content="思考" * 500),
+            )])
+
+    completions = FakeCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    cfg = {"llm": {"reasoning_max_tokens": 32768}}
+
+    response = _complete_with_reasoning_budget(
+        client, cfg, model="deepseek-flash", messages=[], max_tokens=1024,
+    )
+
+    assert completions.calls == [1024, 3072, 9216, 27648, 32768]
+    assert response.choices[0].finish_reason == "length"
