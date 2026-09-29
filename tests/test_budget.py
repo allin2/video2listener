@@ -94,36 +94,102 @@ def test_condensed_overshoot_falls_back_to_text_ratio_without_duration():
     assert condensed_overshoot("word " * 1000, "字" * 800, "en", 0) is None
 
 
-def _run_rewrite(script, retried, source="字" * 1000):
+def _run_condense(outputs, tmp_path, model="m", source="字" * 1000):
+    """outputs: 每次调用 translate 依次返回的文稿；记录 (instruction, scale)。"""
     import asyncio
-    from pathlib import Path
 
     from src.pipeline import orchestrator
 
     calls, messages = [], []
 
-    async def rewrite(instruction):
-        calls.append(instruction)
-        return retried, {"v": "retry"}
+    async def translate(instruction="", length_scale=1.0):
+        calls.append((instruction, length_scale))
+        return outputs[len(calls) - 1], {"pass": len(calls)}
 
-    result = asyncio.run(orchestrator._rewrite_if_condensed_too_long(
-        script, source, "zh", Path("/nonexistent"), messages.append, rewrite,
+    result = asyncio.run(orchestrator._condense_with_budget(
+        translate, source, "zh", tmp_path / "no-metadata", messages.append,
+        model=model, calibration_dir=tmp_path,
     ))
     return result, calls, messages
 
 
-def test_condensed_rewrite_skipped_when_within_budget():
-    result, calls, _ = _run_rewrite("字" * 400, "unused")
-    assert result == ("字" * 400, None) and calls == []
+def test_condense_within_budget_runs_once(tmp_path):
+    result, calls, _ = _run_condense(["字" * 400], tmp_path)
+    assert result == ("字" * 400, {"pass": 1}) and calls == [("", 1.0)]
 
 
-def test_condensed_rewrite_uses_shorter_retry_and_its_audit():
-    result, calls, messages = _run_rewrite("字" * 870, "字" * 420)
-    assert result == ("字" * 420, {"v": "retry"})
-    assert "87%" in calls[0] and "重写后篇幅已达标" in messages
+def test_condense_rewrites_with_scaled_targets_and_keeps_matching_audit(tmp_path):
+    result, calls, messages = _run_condense(["字" * 870, "字" * 420], tmp_path)
+    assert result == ("字" * 420, {"pass": 2})
+    instruction, scale = calls[1]
+    assert "87%" in instruction and "重写后篇幅已达标" in messages
+    assert round(scale, 2) == 0.46  # 目标中值 40% / 实际 87%
 
 
-def test_condensed_rewrite_keeps_original_when_retry_is_longer():
-    result, _, messages = _run_rewrite("字" * 870, "字" * 900)
-    assert result == ("字" * 870, None)
+def test_condense_keeps_first_version_when_retry_is_longer(tmp_path):
+    result, _, messages = _run_condense(["字" * 870, "字" * 900], tmp_path)
+    assert result == ("字" * 870, {"pass": 1})
     assert any("仍超标" in m for m in messages)
+
+
+def test_condense_uses_model_calibration_to_skip_first_pass(tmp_path):
+    # 第一次：无校准，按 1.0 起步，68% → 重写
+    _run_condense(["字" * 680, "字" * 440], tmp_path, model="flash")
+    # 第二次：同模型按校准系数起步，一遍达标
+    result, calls, messages = _run_condense(["字" * 420], tmp_path, model="flash")
+
+    assert len(calls) == 1 and calls[0][1] < 0.7
+    assert any("校准系数" in m for m in messages)
+    # 其他模型不受影响，仍从 1.0 起步
+    _, other_calls, _ = _run_condense(["字" * 400], tmp_path, model="chat")
+    assert other_calls[0][1] == 1.0
+
+
+def test_calibration_is_separate_per_source_language(tmp_path):
+    import json
+
+    _run_condense(["字" * 680, "字" * 440], tmp_path, model="flash")
+    data = json.loads((tmp_path / "condensed_calibration.json").read_text(encoding="utf-8"))
+    assert list(data) == ["flash|zh"]
+
+    from src.audio.budget import calibration_key, initial_length_scale
+
+    assert initial_length_scale(calibration_key("flash", "en"), 0.40, tmp_path) == 1.0
+
+
+def test_rewrite_length_scale_corrects_measured_overshoot():
+    from src.audio.budget import CondensedMeasure, rewrite_length_scale
+
+    # BV1Ccbs6SERa 实测：62%，目标中值 40% → 目标缩到约 65%
+    assert round(rewrite_length_scale(CondensedMeasure(0.62, 0.40, 0.55, "")), 2) == 0.65
+    assert rewrite_length_scale(CondensedMeasure(3.0, 0.40, 0.55, "")) == 0.3  # 下限
+    assert rewrite_length_scale(CondensedMeasure(0.30, 0.40, 0.55, "")) == 1.0  # 不放宽
+
+
+def test_measure_condensed_uses_duration_budget_midpoint():
+    from src.audio.budget import measure_condensed
+
+    m = measure_condensed("原文", "字" * int(620 * CHARS_PER_SECOND), "zh", 1000)
+    assert round(m.ratio, 2) == 0.62 and m.target_mid == 0.40 and m.gate_max == 0.55
+
+
+def test_calibration_blends_runs_per_model(tmp_path):
+    from src.audio.budget import initial_length_scale, record_condensed_run
+
+    assert initial_length_scale("flash", 0.40, tmp_path) == 1.0
+    record_condensed_run("flash", 1.0, 0.68, tmp_path)   # k = 0.68
+    record_condensed_run("flash", 0.58, 0.44, tmp_path)  # k = 0.759 → 平均 0.7193
+    assert round(initial_length_scale("flash", 0.40, tmp_path), 2) == 0.56
+    assert initial_length_scale("other", 0.40, tmp_path) == 1.0
+
+
+def test_calibration_ignores_corrupt_file(tmp_path):
+    from src.audio.budget import initial_length_scale
+
+    (tmp_path / "condensed_calibration.json").write_text("{not json", encoding="utf-8")
+    assert initial_length_scale("flash", 0.40, tmp_path) == 1.0
+
+
+def test_predict_duration_accounts_for_tts_speed():
+    text = "字" * int(100 * CHARS_PER_SECOND)
+    assert round(predict_duration(text, speed=0.9)) == 111

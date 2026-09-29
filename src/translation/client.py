@@ -99,6 +99,54 @@ TRANSLATION_MAX_WORDS = 500
 CONDENSED_MAX_WORDS = 1500
 
 
+# 给模型的字数区间比 30–50% 目标略收紧：实测模型普遍写超
+CONDENSED_TARGET_RATIO = (0.30, 0.45)
+
+
+def _condensed_length_note(segment: str, source_language: str, scale: float = 1.0) -> str:
+    """浓缩版每段的明确字数目标。
+
+    只给「30–50%」时模型会逐句润色而非提炼（BV1Ccbs6SERa 实测输出为原文 96%），
+    换成具体字数区间后遵从度高得多。
+    """
+    from src.audio.budget import ZH_CHARS_PER_EN_WORD
+
+    if source_language == "en":
+        source_chars = len(segment.split()) * ZH_CHARS_PER_EN_WORD
+        unit = "（按中文字数折算）"
+    else:
+        source_chars = len(re.sub(r"\s", "", segment))
+        unit = ""
+    low, high = (max(50, round(source_chars * r * scale / 50) * 50) for r in CONDENSED_TARGET_RATIO)
+    return (
+        f"\n【篇幅硬性要求】本段原文约 {round(source_chars / 50) * 50} 字{unit}，"
+        f"你的输出必须控制在 {low}–{high} 个汉字之间。"
+        "这是浓缩，不是润色：不要逐句改写，要合并同类观点、删掉重复与铺垫，"
+        "只保留核心论点和最关键的例子。\n"
+    )
+
+
+_LENGTH_SENTINEL_RE = re.compile(r"\{\{condensed_length:(\w+)(?::([\d.]+))?\}\}")
+
+
+def _condensed_length_placeholder(source_language: str, scale: float = 1.0) -> str:
+    """占位符，渲染提示词时按「本次请求实际收到的原文」计算字数目标。
+
+    不能在分批时就写死：片段被截断拆半后，每半若仍沿用整段目标，总输出会翻倍。
+    """
+    suffix = f":{scale:.3f}" if abs(scale - 1.0) > 1e-6 else ""
+    return f"{{{{condensed_length:{source_language}{suffix}}}}}"
+
+
+def _render_prompt(template: str, content: str, meta_str: str, source: Optional[str] = None) -> str:
+    """填充提示词模板；source 为计算字数目标所依据的原文（默认即 content）。"""
+    basis = content if source is None else source
+    meta = _LENGTH_SENTINEL_RE.sub(
+        lambda m: _condensed_length_note(basis, m.group(1), float(m.group(2) or 1.0)), meta_str,
+    )
+    return template.replace("{{content}}", content).replace("{{metadata}}", meta)
+
+
 def _condensed_position_note(idx: int, total: int) -> str:
     """浓缩版分段并行时告诉模型当前片段位置，避免每段都开场/总结。"""
     if idx == 0:
@@ -111,7 +159,29 @@ def _condensed_position_note(idx: int, total: int) -> str:
 TRANSLATION_MAX_SPLIT_DEPTH = 5
 
 class TranslationTruncatedError(RuntimeError):
-    """模型因输出长度限制截断翻译。"""
+    """模型因输出长度限制截断翻译。
+
+    reasoning_exhausted 为 True 表示额度被思考过程耗尽（正文几乎为空），
+    此时应提高 max_tokens 重试同一段，而不是拆分——拆小后照样会想到额度耗尽。
+    """
+
+    def __init__(self, message: str, reasoning_exhausted: bool = False):
+        super().__init__(message)
+        self.reasoning_exhausted = reasoning_exhausted
+
+
+# 思考耗尽额度时单次请求可提升到的 max_tokens 上限（可由 llm.reasoning_max_tokens 覆盖）
+REASONING_MAX_TOKENS_CAP = 32768
+# 正文长度不足思考内容的该比例时，判定为思考耗尽额度
+_REASONING_EXHAUSTED_RATIO = 0.2
+
+
+def _raised_max_tokens(cfg: dict, current: int) -> Optional[int]:
+    """思考耗尽时的下一档额度；已到上限返回 None。"""
+    cap = int((cfg.get("llm") or {}).get("reasoning_max_tokens", REASONING_MAX_TOKENS_CAP))
+    if current >= cap:
+        return None
+    return min(current * 3, cap)
 
 
 class TranslationQualityError(RuntimeError):
@@ -332,7 +402,19 @@ def _ensure_response_complete(response) -> None:
     """拒绝把被模型截断的响应当作完整译文。"""
     choice = response.choices[0]
     if getattr(choice, "finish_reason", None) == "length":
-        raise TranslationTruncatedError("模型输出达到长度上限，译文可能不完整")
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None) or ""
+        reasoning = getattr(message, "reasoning_content", None) or ""
+        usage = getattr(response, "usage", None)
+        # 截断内容会被丢弃，留下诊断信息才能判断是输出失控还是思考过程吃掉了额度
+        logger.warning(
+            "Response truncated: completion_tokens=%s, content_chars=%d, reasoning_chars=%d",
+            getattr(usage, "completion_tokens", "?"), len(content), len(reasoning),
+        )
+        raise TranslationTruncatedError(
+            "模型输出达到长度上限，译文可能不完整",
+            reasoning_exhausted=bool(reasoning) and len(content) < len(reasoning) * _REASONING_EXHAUSTED_RATIO,
+        )
 
 
 
@@ -434,7 +516,7 @@ def _translate_single(
     _split_depth: int = 0,
 ) -> None:
     """翻译单个 segment（原始逐段路径复用）。"""
-    prompt = prompt_template.replace("{{content}}", seg).replace("{{metadata}}", meta_str)
+    prompt = _render_prompt(prompt_template, seg, meta_str)
     for attempt in range(retries):
         try:
             response = client.chat.completions.create(
@@ -511,9 +593,7 @@ def _translate_batch(
     batch_instruction = (
         f"将以下 {n} 段英文翻译为中文。每段翻译结果之间用 {BATCH_DELIMITER} 分隔。\n\n"
     )
-    prompt = (
-        prompt_template.replace("{{content}}", batch_instruction + joined).replace("{{metadata}}", meta_str)
-    )
+    prompt = _render_prompt(prompt_template, batch_instruction + joined, meta_str, source=joined)
 
     for attempt in range(retries):
         try:
@@ -678,9 +758,11 @@ async def _translate_single_async(
     backoff: float,
     cancel_event: Optional[asyncio.Event] = None,
     _split_depth: int = 0,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """异步翻译单个 segment。"""
-    prompt = prompt_template.replace("{{content}}", seg).replace("{{metadata}}", meta_str)
+    prompt = _render_prompt(prompt_template, seg, meta_str)
+    budget = max_tokens or cfg["llm"]["max_tokens"]
     for attempt in range(retries):
         if cancel_event and cancel_event.is_set():
             raise asyncio.CancelledError("翻译被用户取消")
@@ -692,13 +774,25 @@ async def _translate_single_async(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=cfg["llm"]["temperature"],
-                max_tokens=cfg["llm"]["max_tokens"],
+                max_tokens=budget,
             )
             _ensure_response_complete(response)
             result = (response.choices[0].message.content or "").strip()
             _validate_translated_part(result)
             return result
         except TranslationTruncatedError as e:
+            raised = _raised_max_tokens(cfg, budget) if e.reasoning_exhausted else None
+            if raised:
+                logger.warning(
+                    "Translation segment %d/%d: reasoning exhausted max_tokens=%d; retrying with %d",
+                    idx + 1, total, budget, raised,
+                )
+                return await _translate_single_async(
+                    client=client, model_name=model_name, prompt_template=prompt_template,
+                    meta_str=meta_str, seg=seg, idx=idx, total=total,
+                    cfg=cfg, retries=retries, backoff=backoff,
+                    cancel_event=cancel_event, _split_depth=_split_depth, max_tokens=raised,
+                )
             subsegments = _split_truncated_segment(seg)
             if not subsegments or _split_depth >= TRANSLATION_MAX_SPLIT_DEPTH:
                 raise RuntimeError(f"翻译被截断且无法继续拆分: {e}") from e
@@ -713,6 +807,7 @@ async def _translate_single_async(
                     meta_str=meta_str, seg=subsegment, idx=idx, total=total,
                     cfg=cfg, retries=retries, backoff=backoff,
                     cancel_event=cancel_event, _split_depth=_split_depth + 1,
+                    max_tokens=budget,
                 )
                 results.append(result)
             return "\n".join(results)
@@ -750,9 +845,7 @@ async def _translate_batch_async(
         f"输出必须正好包含 {n} 段，各段之间只用 {BATCH_DELIMITER} 分隔。\n\n"
     ) if n > 1 else ""
     content = batch[0] if n == 1 else batch_instruction + joined
-    prompt = (
-        prompt_template.replace("{{content}}", content).replace("{{metadata}}", meta_str)
-    )
+    prompt = _render_prompt(prompt_template, content, meta_str, source=joined if n > 1 else None)
 
     for attempt in range(retries):
         if cancel_event and cancel_event.is_set():
@@ -792,15 +885,20 @@ async def _translate_batch_async(
                 meta_str=meta_str, batch=batch, batch_idx=batch_idx, total_batches=total_batches,
                 cfg=cfg, retries=retries, backoff=backoff, cancel_event=cancel_event,
             )
-        except TranslationTruncatedError:
+        except TranslationTruncatedError as e:
+            raised = (
+                _raised_max_tokens(cfg, cfg["llm"]["max_tokens"]) if e.reasoning_exhausted else None
+            )
             logger.warning(
-                "Async batch %d/%d was truncated; falling back to sequential",
+                "Async batch %d/%d was truncated%s; falling back to sequential",
                 batch_idx + 1, total_batches,
+                f" (reasoning exhausted, max_tokens → {raised})" if raised else "",
             )
             return await _fallback_sequential_async(
                 client=client, model_name=model_name, prompt_template=prompt_template,
                 meta_str=meta_str, batch=batch, batch_idx=batch_idx, total_batches=total_batches,
                 cfg=cfg, retries=retries, backoff=backoff, cancel_event=cancel_event,
+                max_tokens=raised,
             )
         except Exception as e:
             logger.warning(
@@ -829,14 +927,16 @@ async def _fallback_sequential_async(
     retries: int,
     backoff: float,
     cancel_event: Optional[asyncio.Event] = None,
+    max_tokens: Optional[int] = None,
 ) -> list[str]:
-    """异步逐段翻译回退路径。"""
+    """异步逐段翻译回退路径。max_tokens 为批量请求因思考耗尽而提升后的额度。"""
     results: list[str] = []
     for i, seg in enumerate(batch):
         result = await _translate_single_async(
             client=client, model_name=model_name, prompt_template=prompt_template,
             meta_str=meta_str, seg=seg, idx=i, total=len(batch),
             cfg=cfg, retries=retries, backoff=backoff, cancel_event=cancel_event,
+            max_tokens=max_tokens,
         )
         results.append(result)
     return results
@@ -873,6 +973,7 @@ async def translate_async(
     on_audit: Optional[Callable[[dict], None]] = None,
     source_language: str = "en",
     extra_instruction: str = "",
+    length_scale: float = 1.0,
 ) -> str:
     """异步并发翻译/重写入口。
 
@@ -918,9 +1019,11 @@ async def translate_async(
         prompt_file = MODE_PROMPTS.get(mode, MODE_PROMPTS["podcast"])
     prompt_template = _load_prompt(prompt_file)
 
-    role_str = (cfg.get("llm") or {}).get("translator_role", "")
-    if role_str:
-        prompt_template = prompt_template.replace("{{role}}", role_str)
+    # 中文源是改写而非翻译：translator_role 强调「翻译准确、关键信息必须保留」，
+    # 会把浓缩/重述推向逐句忠实整理，因此中文源单独使用 rewriter_role。
+    role_key = "rewriter_role" if source_language == "zh" else "translator_role"
+    role_str = (cfg.get("llm") or {}).get(role_key, "")
+    prompt_template = prompt_template.replace("{{role}}", role_str)
 
     meta_str = ""
     if metadata:
@@ -982,8 +1085,10 @@ async def translate_async(
             if cancel_event and cancel_event.is_set():
                 raise asyncio.CancelledError("翻译被用户取消")
             batch_meta = meta_str
-            if mode == "condensed" and len(batches) > 1:
-                batch_meta = meta_str + _condensed_position_note(idx, len(batches))
+            if mode == "condensed":
+                batch_meta += _condensed_length_placeholder(source_language, length_scale)
+                if len(batches) > 1:
+                    batch_meta += _condensed_position_note(idx, len(batches))
             result = await _translate_batch_async(
                 client=client, model_name=model_name, prompt_template=prompt_template,
                 meta_str=batch_meta, batch=batch, batch_idx=idx, total_batches=len(batches),

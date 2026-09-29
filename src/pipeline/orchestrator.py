@@ -36,9 +36,14 @@ from src.translation.client import (
 from src.tts.cleaner import clean_for_tts
 from src.tts.synthesizer import synthesize, synthesize_async
 from src.audio.budget import (
-    condensed_overshoot,
+    calibration_key,
+    condensed_target_mid,
     duration_budget,
+    initial_length_scale,
+    measure_condensed,
     predict_duration,
+    record_condensed_run,
+    rewrite_length_scale,
     synthesized_duration_error,
 )
 from src.audio.merger import _probe_duration, merge, merge_async
@@ -599,37 +604,31 @@ async def _process_impl(
             else:
                 action_name = "翻译" if source_lang == "en" else ("播客重述" if mode == "podcast" else "内容浓缩")
                 progress(f"开始{action_name}（模式: {mode}）...")
-                script_zh = await llm_translate_async(
-                    clean_text_content,
-                    mode,
-                    metadata,
-                    on_progress=progress,
-                    llm_config=llm_config,
-                    cancel_event=cancel_event,
-                    on_audit=translation_audit.update,
-                    source_language=source_lang,
-                )
-                if mode == "condensed":
-                    async def rewrite(instruction: str) -> tuple[str, dict]:
-                        retry_audit: dict = {}
-                        text = await llm_translate_async(
-                            clean_text_content,
-                            mode,
-                            metadata,
-                            on_progress=progress,
-                            llm_config=llm_config,
-                            cancel_event=cancel_event,
-                            on_audit=retry_audit.update,
-                            source_language=source_lang,
-                            extra_instruction=instruction,
-                        )
-                        return text, retry_audit
-
-                    script_zh, chosen_audit = await _rewrite_if_condensed_too_long(
-                        script_zh, clean_text_content, source_lang, data_dir, progress, rewrite,
+                async def translate_with(
+                    instruction: str = "", length_scale: float = 1.0,
+                ) -> tuple[str, dict]:
+                    audit: dict = {}
+                    text = await llm_translate_async(
+                        clean_text_content,
+                        mode,
+                        metadata,
+                        on_progress=progress,
+                        llm_config=llm_config,
+                        cancel_event=cancel_event,
+                        on_audit=audit.update,
+                        source_language=source_lang,
+                        extra_instruction=instruction,
+                        length_scale=length_scale,
                     )
-                    if chosen_audit is not None:
-                        translation_audit = chosen_audit
+                    return text, audit
+
+                if mode == "condensed":
+                    script_zh, translation_audit = await _condense_with_budget(
+                        translate_with, clean_text_content, source_lang, data_dir, progress,
+                        model=_llm_model_name(llm_config), speed=_tts_speed(tts_config),
+                    )
+                else:
+                    script_zh, translation_audit = await translate_with()
             _validate_translation_output(clean_text_content, script_zh, mode)
             _ensure_distinct_mode_script(video_id, mode, script_zh)
             script_path = target_dir / "script_zh.txt"
@@ -727,14 +726,14 @@ async def _process_impl(
             tts_text = clean_for_tts(script_zh)
             tts_text_path = target_dir / "tts_text.txt"
             tts_text_path.write_text(tts_text, encoding="utf-8")
-            progress(_duration_estimate_message(mode, tts_text, data_dir))
+            progress(_duration_estimate_message(mode, tts_text, data_dir, _tts_speed(tts_config)))
 
             tts_dir = target_dir / "tts_segments"
             tts_dir.mkdir(exist_ok=True)
 
             progress("开始语音合成...")
             segments = await synthesize_async(tts_text, tts_dir, on_progress=progress, tts_config=tts_config)
-            _check_synthesized_duration(tts_text, segments)
+            _check_synthesized_duration(tts_text, segments, _tts_speed(tts_config))
 
             # --- Cancel check before merge ---
             if _check_cancel(cancel_event, progress):
@@ -879,9 +878,9 @@ def _source_duration_seconds(data_dir: Path) -> float:
         return 0.0
 
 
-def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path) -> str:
+def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path, speed: float = 1.0) -> str:
     """合成前预估时长；超出该模式相对原视频的目标区间时提示（不阻塞）。"""
-    estimate = predict_duration(tts_text)
+    estimate = predict_duration(tts_text, speed=speed)
     message = f"预计音频时长约 {estimate / 60:.1f} 分钟"
     source_seconds = _source_duration_seconds(data_dir)
     if source_seconds > 0:
@@ -895,40 +894,70 @@ def _duration_estimate_message(mode: str, tts_text: str, data_dir: Path) -> str:
     return message
 
 
-async def _rewrite_if_condensed_too_long(
-    script: str,
+def _llm_model_name(llm_config: Optional[dict]) -> str:
+    return (llm_config or {}).get("model") or (get_config().get("llm") or {}).get("model", "")
+
+
+def _tts_speed(tts_config: Optional[dict]) -> float:
+    try:
+        return float((tts_config or {}).get("speed") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+async def _condense_with_budget(
+    translate: Callable[..., Awaitable[tuple[str, dict]]],
     source_text: str,
     source_lang: str,
     data_dir: Path,
     progress: Callable[[str], None],
-    rewrite: Callable[[str], Awaitable[tuple[str, dict]]],
-) -> tuple[str, Optional[dict]]:
-    """浓缩稿超出篇幅预算时带反馈重写一次；仍超标则取较短版本并提示，不让任务失败。
+    *,
+    model: str,
+    speed: float = 1.0,
+    calibration_dir: Optional[Path] = None,
+) -> tuple[str, dict]:
+    """按模型校准系数一遍生成浓缩稿；仍超标时按实测偏差收紧再重写一次。
 
-    返回 (文稿, 审计)。审计为 None 表示沿用首版审计；采用重写版时返回其审计，
-    保证写盘的文稿与审计哈希一致。
+    每次结果都回写校准，下次同模型直接按校准系数起步。重写后仍超标则取较短
+    版本并提示，不让任务失败。返回 (文稿, 与之匹配的审计)。
     """
     source_seconds = _source_duration_seconds(data_dir)
-    feedback = condensed_overshoot(source_text, script, source_lang, source_seconds)
-    if not feedback:
-        return script, None
-    progress(f"浓缩篇幅超标：{feedback}，重写一次...")
-    retried, retried_audit = await rewrite(
-        f"【篇幅要求】{feedback}。请更大幅度地提炼：只保留最核心的观点、论证和关键案例，"
-        "合并重复表达，把篇幅控制在目标范围内。"
+    key = calibration_key(model, source_lang)
+
+    def measure(text: str):
+        return measure_condensed(source_text, text, source_lang, source_seconds, speed)
+
+    scale = initial_length_scale(key, condensed_target_mid(source_seconds), calibration_dir)
+    if scale < 1.0:
+        progress(f"按 {model} 的校准系数 {scale:.0%} 设定每段字数")
+    script, audit = await translate(length_scale=scale)
+    first = measure(script)
+    if first:
+        record_condensed_run(key, scale, first.ratio, calibration_dir)
+    if not first or first.ratio <= first.gate_max:
+        return script, audit
+
+    retry_scale = rewrite_length_scale(first, scale)
+    progress(f"浓缩篇幅超标：{first.feedback}，按 {retry_scale:.0%} 收紧每段字数后重写一次...")
+    retried, retried_audit = await translate(
+        f"【上一版篇幅超标】{first.feedback}。本次每段的字数上限已相应下调，必须严格遵守："
+        "先找出本段最核心的 3–5 个观点，再围绕它们重新组织表达，其余内容一律删去。",
+        retry_scale,
     )
-    remaining = condensed_overshoot(source_text, retried, source_lang, source_seconds)
-    if remaining:
-        progress(f"重写后仍超标：{remaining}，保留较短版本继续")
-        logger.warning("浓缩重写后仍超标: %s", remaining)
+    second = measure(retried)
+    if second:
+        record_condensed_run(key, retry_scale, second.ratio, calibration_dir)
+    if second and second.ratio > second.gate_max:
+        progress(f"重写后仍超标：{second.feedback}，保留较短版本继续")
+        logger.warning("浓缩重写后仍超标: %s", second.feedback)
     else:
         progress("重写后篇幅已达标")
     if len(retried) <= len(script):
         return retried, retried_audit
-    return script, None
+    return script, audit
 
 
-def _check_synthesized_duration(tts_text: str, segments: list[Path]) -> None:
+def _check_synthesized_duration(tts_text: str, segments: list[Path], speed: float = 1.0) -> None:
     """合并前用预估时长校验合成结果，异常时让任务失败而不是产出坏音频。"""
     try:
         actual = sum(_probe_duration(Path(segment)) for segment in segments)
@@ -936,7 +965,7 @@ def _check_synthesized_duration(tts_text: str, segments: list[Path]) -> None:
         # 读不到时长（缺 ffprobe 等）时跳过，不因检查本身失败而误杀任务
         logger.warning("无法读取合成片段时长，跳过时长校验", exc_info=True)
         return
-    error = synthesized_duration_error(predict_duration(tts_text), actual)
+    error = synthesized_duration_error(predict_duration(tts_text, speed=speed), actual)
     if error:
         raise RuntimeError(error)
 
