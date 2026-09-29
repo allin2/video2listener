@@ -1,6 +1,7 @@
 audio
 bot
 pipeline
+sources
 storage
 transcription
 translation
