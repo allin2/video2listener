@@ -1,4 +1,10 @@
 """U3 测试。文本清洗模块。"""
+import json
+import subprocess
+
+import pytest
+
+from src.transcription import transcriber
 from src.transcription.cleaner import clean
 
 
@@ -205,4 +211,94 @@ def test_transcribe_with_faster_whisper(tmp_path, monkeypatch):
     assert len(entries) == 1
     assert entries[0] == {"start": "00:00:00", "end": "00:00:03", "text": "Faster whisper text"}
     mock_fw.WhisperModel.assert_called_once_with("large-v3-turbo", device="cpu", compute_type="int8")
+
+
+def test_transcribe_with_whisper_cpp_provider(tmp_path, monkeypatch):
+    """whisper.cpp provider：ffmpeg 转码 → 调用 whisper-cli → 解析 JSON offsets。"""
+    from src.transcription.transcriber import transcribe
+    import src.transcription.transcriber as transcriber_module
+
+    model = tmp_path / "ggml-large-v3-turbo.bin"
+    model.touch()
+    fake_audio = tmp_path / "test.m4a"
+    fake_audio.touch()
+
+    test_cfg = {
+        "asr": {
+            "provider": "whisper-cpp",
+            "model": "large-v3-turbo",
+            "model_path": str(model),
+            "whisper_cpp_bin": str(tmp_path / "whisper-cli.exe"),
+        }
+    }
+    monkeypatch.setattr(transcriber_module, "get_config", lambda: test_cfg)
+    monkeypatch.setattr(transcriber_module.shutil, "which", lambda name: f"/fake/{name}")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[0] != str(tmp_path / "whisper-cli.exe"):
+            return subprocess.CompletedProcess(cmd, 0, "", "")  # ffmpeg
+        prefix = cmd[cmd.index("-of") + 1]
+        payload = {
+            "transcription": [
+                {"offsets": {"from": 0, "to": 2000}, "text": " Hello world"},
+                {"offsets": {"from": 2000, "to": 61234}, "text": " second "},
+                {"text": "no offsets, skipped"},
+            ]
+        }
+        with open(prefix + ".json", "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return subprocess.CompletedProcess(
+            cmd, 0, "", "ggml_vulkan: Found 1 Vulkan devices (AMD Radeon RX 5700 XT)"
+        )
+
+    monkeypatch.setattr(transcriber_module.subprocess, "run", fake_run)
+
+    entries = transcribe(fake_audio, language="en")
+
+    assert entries == [
+        {"start": "00:00:00", "end": "00:00:02", "text": "Hello world"},
+        {"start": "00:00:02", "end": "00:01:01", "text": "second"},
+    ]
+    cli_call = calls[1]
+    assert "-oj" in cli_call and "-np" in cli_call
+    assert cli_call[cli_call.index("-l") + 1] == "en"
+    assert cli_call[cli_call.index("-m") + 1] == str(model)
+
+
+def test_whisper_cpp_missing_binary_raises(tmp_path, monkeypatch):
+    import src.transcription.transcriber as transcriber_module
+
+    model = tmp_path / "m.bin"
+    model.touch()
+    audio = tmp_path / "a.m4a"
+    audio.touch()
+
+    monkeypatch.setattr(transcriber_module.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="whisper-cli"):
+        transcriber_module._transcribe_whisper_cpp(audio, str(model))
+
+
+def test_whisper_cpp_cli_failure_surfaces_stderr(tmp_path, monkeypatch):
+    import src.transcription.transcriber as transcriber_module
+
+    model = tmp_path / "m.bin"
+    model.touch()
+    audio = tmp_path / "a.m4a"
+    audio.touch()
+
+    monkeypatch.setattr(transcriber_module.shutil, "which", lambda name: f"/fake/{name}")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0].endswith("whisper-cli"):
+            return subprocess.CompletedProcess(cmd, 1, "", "boom: out of memory")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(transcriber_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        transcriber_module._transcribe_whisper_cpp(audio, str(model))
 

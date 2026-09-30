@@ -52,11 +52,14 @@ llm:
     不捏造原文没有的事实。转写稿中的错别字和同音误识别（如把 Claude 识别成 Cloud）应按上下文更正。
 
 asr:
-  provider: whisper            # whisper | faster-whisper
+  provider: whisper-cpp        # whisper | faster-whisper | whisper-cpp
   model: large-v3-turbo
-  model_path: ~/.cache/whisper/large-v3-turbo.pt
+  model_path: ~/.cache/whisper/ggml-large-v3-turbo.bin
   device: cpu
   compute_type: int8
+  # whisper.cpp（Vulkan GPU）：需先编译 -DGGML_VULKAN=ON，model_path 需指向 ggml .bin
+  whisper_cpp_bin: E:/AI-pro/whisper.cpp/build/bin/whisper-cli.exe
+  whisper_cpp_threads: 8
 
 tts:
   provider: fish              # fish | edge | mimi | openai
