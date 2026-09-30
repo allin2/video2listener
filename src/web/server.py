@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -31,7 +32,23 @@ logger = logging.getLogger(__name__)
 # 服务启动时初始化数据库（幂等）
 db.init_db()
 
-app = FastAPI(title="video2listener", version="0.1.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """启动时回收中断的任务。
+
+    任务进度只存在内存 _task_states 里，重启即丢失；数据库里残留的非终态行
+    不可能再被推进，必须回收为 failed，否则前端会永久卡在「排队中」。
+    """
+    recovered = db.mark_orphaned_tasks(
+        "服务重启导致任务中断，请重新提交（已完成的阶段会自动复用）"
+    )
+    if recovered:
+        logger.warning("启动回收：%d 条中断任务已标记为失败", recovered)
+    yield
+
+
+app = FastAPI(title="video2listener", version="0.1.0", lifespan=_lifespan)
 
 MODE_LABELS = {"podcast": "中文播客版", "faithful": "忠实翻译版", "condensed": "精华浓缩版"}
 
@@ -687,61 +704,84 @@ async def api_process(request: Request):
     )
 
     async def _run_async():
-        _set_task_state(video_id, mode, status="processing")
+        try:
+            _set_task_state(video_id, mode, status="processing")
 
-        def progress(msg: str):
-            _append_progress(video_id, mode, msg)
+            def progress(msg: str):
+                _append_progress(video_id, mode, msg)
 
-        # 获取 cancel_event
-        with _task_lock:
-            entry = _task_states.get(_task_key(video_id, mode))
-            cancel_event = entry.get("cancel_event") if entry else None
+            # 获取 cancel_event
+            with _task_lock:
+                entry = _task_states.get(_task_key(video_id, mode))
+                cancel_event = entry.get("cancel_event") if entry else None
 
-        result = await _process_async(
-            video_id, mode, force=force, on_progress=progress,
-            llm_config=llm_config, tts_config=tts_config,
-            cancel_event=cancel_event,
-            resume_from=resume_from or None,
-        )
-
-        if result["status"] == "done" and result["output_path"]:
-            _set_task_state(
-                video_id,
-                mode,
-                status="done",
-                output_path=result["output_path"],
-                audit_status=result.get("audit_status", ""),
-                audit_message=result.get("audit_message", ""),
-                completed_at=time.time(),
+            result = await _process_async(
+                video_id, mode, force=force, on_progress=progress,
+                llm_config=llm_config, tts_config=tts_config,
+                cancel_event=cancel_event,
+                resume_from=resume_from or None,
             )
-            # 发射 pipeline_complete
-            episode = db.get_episode(video_id)
-            title = episode.get("title_original", video_id) if episode else video_id
-            _emit_sse_event(video_id, mode, "pipeline_complete", {
-                "video_id": video_id,
-                "mode": mode,
-                "output_path": result["output_path"],
-                "title": title,
-                "audit_status": result.get("audit_status", ""),
-                "audit_message": result.get("audit_message", ""),
-            })
-        elif result["status"] == "cancelled":
-            _set_task_state(
-                video_id,
-                mode,
-                status="cancelled",
-                error_message=result.get("message", "用户取消"),
-                completed_at=time.time(),
-            )
-            # 发射 pipeline_cancelled
-            resumable_from = result.get("resumable_from", "translated")
-            _emit_sse_event(video_id, mode, "pipeline_cancelled", {
-                "video_id": video_id,
-                "mode": mode,
-                "resumable_from": resumable_from,
-            })
-        else:
-            error_msg = result.get("message", "未知错误")
+
+            if result["status"] == "done" and result["output_path"]:
+                _set_task_state(
+                    video_id,
+                    mode,
+                    status="done",
+                    output_path=result["output_path"],
+                    audit_status=result.get("audit_status", ""),
+                    audit_message=result.get("audit_message", ""),
+                    completed_at=time.time(),
+                )
+                # 发射 pipeline_complete
+                episode = db.get_episode(video_id)
+                title = episode.get("title_original", video_id) if episode else video_id
+                _emit_sse_event(video_id, mode, "pipeline_complete", {
+                    "video_id": video_id,
+                    "mode": mode,
+                    "output_path": result["output_path"],
+                    "title": title,
+                    "audit_status": result.get("audit_status", ""),
+                    "audit_message": result.get("audit_message", ""),
+                })
+            elif result["status"] == "cancelled":
+                _set_task_state(
+                    video_id,
+                    mode,
+                    status="cancelled",
+                    error_message=result.get("message", "用户取消"),
+                    completed_at=time.time(),
+                )
+                # 发射 pipeline_cancelled
+                resumable_from = result.get("resumable_from", "translated")
+                _emit_sse_event(video_id, mode, "pipeline_cancelled", {
+                    "video_id": video_id,
+                    "mode": mode,
+                    "resumable_from": resumable_from,
+                })
+            else:
+                error_msg = result.get("message", "未知错误")
+                _set_task_state(
+                    video_id,
+                    mode,
+                    status="failed",
+                    error_message=error_msg,
+                    completed_at=time.time(),
+                )
+                # 发射 pipeline_error
+                with _task_lock:
+                    entry = _task_states.get(_task_key(video_id, mode))
+                    failed_stage = entry.get("current_stage_id", 0) if entry else 0
+                _emit_sse_event(video_id, mode, "pipeline_error", {
+                    "stage_id": failed_stage,
+                    "mode": mode,
+                    "message": error_msg,
+                })
+        except Exception as exc:
+            # _process_impl 的 try 从下载前才开始，之前的路径解析、建库、建变体行
+            # 等异常会直接冒泡到这里。不兜底的话任务会永久停在 processing，既没有
+            # 终态也没有恢复入口。
+            logger.exception("任务 %s/%s 出现未预期异常: %s", video_id, mode, exc)
+            error_msg = f"处理过程出现未预期错误: {exc}"
             _set_task_state(
                 video_id,
                 mode,
@@ -749,7 +789,11 @@ async def api_process(request: Request):
                 error_message=error_msg,
                 completed_at=time.time(),
             )
-            # 发射 pipeline_error
+            # 同步回写数据库，否则历史抽屉仍显示「未完成」。异常可能发生在建库
+            # 之前，此时没有 episode 行可写——变体行有外键约束，硬写会抛错。
+            if db.get_episode(video_id) is not None:
+                db.update_status(video_id, "failed", error_message=error_msg)
+                db.update_variant_status(video_id, mode, "failed", error_message=error_msg)
             with _task_lock:
                 entry = _task_states.get(_task_key(video_id, mode))
                 failed_stage = entry.get("current_stage_id", 0) if entry else 0
@@ -885,9 +929,11 @@ async def api_status(video_id: str, mode: Optional[str] = None):
         db_status = variant.get("status", "new") if variant else source_status
         if source_status == "failed" and db_status == "new":
             db_status = "failed"
-        # 映射数据库状态到前端状态
+        # 映射数据库状态到前端状态。'new' 不能映射成 'queued'：任务状态只存在
+        # 内存里，走到这个数据库兜底就说明本进程没有在跑它，映射成排队中会让
+        # 用户永久卡在「排队中…」，没有任何恢复入口。
         status_map = {
-            "new": "queued",
+            "new": "failed",
             "metadata_fetched": "processing",
             "text_ready": "processing",
             "translated": "processing",

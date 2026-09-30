@@ -538,3 +538,74 @@ def test_tasks_expose_platform_thumbnail_and_hide_stale_errors(isolated_web_db, 
     assert "output_seconds" in yt["variants"][0]
     assert items["BV1xx411c7X5"]["platform"] == "bilibili"
     assert items["BV1xx411c7X5"]["thumbnail_url"] == ""
+
+
+def test_mark_orphaned_tasks_recovers_non_terminal_rows(isolated_web_db):
+    """启动回收：非终态行落 failed，终态行不动，且幂等。"""
+    db.create_episode(video_id="orphanvid001", url="u", mode="podcast")
+    db.update_status("orphanvid001", "metadata_fetched")
+    db.upsert_variant("orphanvid001", "podcast", status="new")
+
+    db.create_episode(video_id="donevid00001", url="u", mode="podcast")
+    db.update_status("donevid00001", "done")
+    db.upsert_variant("donevid00001", "podcast", status="done", audio_zh_path="/tmp/a.mp3")
+
+    affected = db.mark_orphaned_tasks("服务重启导致任务中断")
+
+    assert affected == 2  # 1 条变体行 + 1 条 episode 行
+    orphan_variant = db.get_variant("orphanvid001", "podcast")
+    assert orphan_variant["status"] == "failed"
+    assert orphan_variant["error_message"] == "服务重启导致任务中断"
+    assert db.get_episode("orphanvid001")["status"] == "failed"
+
+    assert db.get_episode("donevid00001")["status"] == "done"
+    assert db.get_variant("donevid00001", "podcast")["status"] == "done"
+
+    # 幂等：再跑一次没有可回收的行
+    assert db.mark_orphaned_tasks("服务重启导致任务中断") == 0
+
+
+def test_startup_recovers_interrupted_task_as_failed(isolated_web_db):
+    """重启后残留的任务不能显示成「排队中」，必须是可恢复的 failed。"""
+    db.create_episode(video_id="BV1stuck0001", url="u", mode="condensed")
+    db.update_status("BV1stuck0001", "metadata_fetched")
+    db.upsert_variant("BV1stuck0001", "condensed", status="new")
+
+    with TestClient(server.app) as client:
+        body = client.get("/api/status/BV1stuck0001/condensed").json()
+
+    assert body["status"] == "failed"
+    assert "中断" in body["error_message"]
+
+
+def test_unexpected_pipeline_exception_marks_task_failed(isolated_web_db, monkeypatch):
+    """管道抛未预期异常时任务必须落 failed，不能停在 processing。"""
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    # 真实流程里 episode 行在下载之前就已建好，异常兜底必须同时回写内存与数据库。
+    db.create_episode("vid12345678", url="u", mode="podcast")
+    db.update_status("vid12345678", "metadata_fetched")
+
+    monkeypatch.setattr(server, "resolve_canonical_video_id", lambda url: ("youtube", "vid12345678", None))
+    monkeypatch.setattr(server, "_process_async", _boom)
+
+    with TestClient(server.app) as client:
+        resp = client.post("/api/process", json={
+            "url": "https://youtu.be/vid12345678",
+            "mode": "podcast",
+            "api_key": "test_key",
+            "model": "deepseek-chat",
+        })
+        assert resp.status_code == 200
+
+        body = {}
+        for _ in range(100):
+            body = client.get("/api/status/vid12345678/podcast").json()
+            if body.get("status") == "failed":
+                break
+            time.sleep(0.02)
+
+    assert body["status"] == "failed"
+    assert "未预期错误" in body["error_message"]
+    assert db.get_variant("vid12345678", "podcast")["status"] == "failed"

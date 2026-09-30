@@ -231,6 +231,29 @@ def update_status(
     conn.close()
 
 
+def mark_orphaned_tasks(error_message: str) -> int:
+    """把中断的任务回收为终态，返回受影响的行数。
+
+    任务进度只存在内存里，服务重启即丢失。数据库里仍停留在非终态的行不可能
+    再有进程去推进它们，必须落到 failed，否则前端会永久显示「排队中 / 处理中」
+    且没有任何恢复入口。单事务、幂等：重复调用第二次返回 0。
+    """
+    terminal = ("done", "failed", "cancelled")
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    affected = 0
+    for table in ("episode_variant", "episode"):
+        cursor = conn.execute(
+            f"""UPDATE {table} SET status = 'failed', error_message = ?, updated_at = ?
+                WHERE status NOT IN (?, ?, ?)""",
+            (error_message, now, *terminal),
+        )
+        affected += cursor.rowcount or 0
+    conn.commit()
+    conn.close()
+    return affected
+
+
 def get_episode(video_id: str) -> Optional[dict]:
     """查询 episode 记录。"""
     conn = _get_conn()
