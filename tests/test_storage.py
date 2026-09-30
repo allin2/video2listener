@@ -1,6 +1,7 @@
 """SQLite 共享视频与模式变体存储回归测试。"""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -78,7 +79,7 @@ def test_legacy_episode_is_backfilled_once_without_moving_paths(tmp_path, monkey
     variant = db.get_variant("video123456", "faithful")
     assert variant["status"] == "done"
     assert variant["variant_dir"] is None
-    assert variant["audio_zh_path"].endswith("legacy/output.mp3")
+    assert Path(variant["audio_zh_path"]).as_posix().endswith("legacy/output.mp3")
 
     assert db.delete_variant("video123456", "faithful") is True
     db.init_db()
