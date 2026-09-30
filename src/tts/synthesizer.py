@@ -309,7 +309,15 @@ def _fish_tts(text: str, output_path: Path, tts_config: Optional[dict] = None,
 
     import time as _time
 
-    opener = urllib.request.build_opener()
+    # Fish Audio 服务器在海外：配置了 network.proxy 时走该代理（与 yt-dlp 行为一致），
+    # 未配置时保持默认 opener（跟随环境变量代理）。Edge/Mimi 不受影响（前者强制直连，后者国内可直达）。
+    proxy = (get_config().get("network") or {}).get("proxy", "")
+    if proxy:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        )
+    else:
+        opener = urllib.request.build_opener()
 
     def _call_api():
         last_error: Optional[Exception] = None
